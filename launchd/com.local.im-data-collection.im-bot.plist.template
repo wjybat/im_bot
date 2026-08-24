@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.local.im-data-collection.im-bot</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__ROOT__/src/main.mjs</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__ROOT__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>PATH</key>
+    <string>__PATH__</string>
+    <key>IM_BOT_LARK_CLI</key>
+    <string>__LARK_CLI__</string>
+    <key>IM_BOT_CODEX_CLI</key>
+    <string>__CODEX_CLI__</string>
+    <key>IM_BOT_CODEX_SANDBOX</key>
+    <string>workspace-write</string>
+    <key>IM_BOT_ALLOW_USER_WRITES</key>
+    <string>false</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>__ROOT__/logs/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__ROOT__/logs/launchd.err.log</string>
+</dict>
+</plist>
