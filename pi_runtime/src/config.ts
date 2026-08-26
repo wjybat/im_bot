@@ -1,0 +1,98 @@
+import { accessSync, constants, existsSync } from "node:fs"
+import { homedir } from "node:os"
+import { basename, dirname, join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core"
+import type { RuntimeConfig } from "./types.js"
+
+const moduleParent = resolve(dirname(fileURLToPath(import.meta.url)), "..")
+const projectRoot = basename(moduleParent) === "dist" ? resolve(moduleParent, "..") : moduleParent
+const envFile = resolve(projectRoot, ".env")
+
+if (existsSync(envFile)) {
+  const inheritedEnvironment = { ...process.env }
+  process.loadEnvFile(envFile)
+  Object.assign(process.env, inheritedEnvironment)
+}
+
+function firstExecutable(fallback: string, candidates: string[]): string {
+  for (const candidate of candidates) {
+    try {
+      accessSync(candidate, constants.X_OK)
+      return candidate
+    } catch {
+      // Continue to PATH fallback.
+    }
+  }
+  return fallback
+}
+
+function integer(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw === "") return fallback
+  const value = Number.parseInt(raw, 10)
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}`)
+  }
+  return value
+}
+
+function boolean(name: string, fallback: boolean): boolean {
+  const raw = process.env[name]
+  if (raw === undefined || raw === "") return fallback
+  if (["1", "true", "yes", "on"].includes(raw.toLowerCase())) return true
+  if (["0", "false", "no", "off"].includes(raw.toLowerCase())) return false
+  throw new Error(`${name} must be true or false`)
+}
+
+function provider(): RuntimeConfig["provider"] {
+  const value = process.env.IM_BOT_PI_PROVIDER || "dmall-ai"
+  if (!new Set(["dmall-ai", "openai", "anthropic", "openai-codex"]).has(value)) {
+    throw new Error("IM_BOT_PI_PROVIDER must be dmall-ai, openai, anthropic, or openai-codex")
+  }
+  return value as RuntimeConfig["provider"]
+}
+
+function thinkingLevel(): ThinkingLevel {
+  const value = process.env.IM_BOT_PI_THINKING || "high"
+  if (!new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]).has(value)) {
+    throw new Error("IM_BOT_PI_THINKING is invalid")
+  }
+  return value as ThinkingLevel
+}
+
+export function loadConfig(): RuntimeConfig {
+  if (boolean("IM_BOT_PI_ALLOW_USER_WRITES", false)) {
+    throw new Error("IM_BOT_PI_ALLOW_USER_WRITES=true is not supported")
+  }
+  return Object.freeze({
+    projectRoot,
+    skillsDir: resolve(projectRoot, "runtime", "skills"),
+    systemPromptFile: resolve(projectRoot, "runtime", "system.md"),
+    stateFile: resolve(projectRoot, "var", "processed-messages.json"),
+    authFile: resolve(projectRoot, process.env.IM_BOT_PI_AUTH_FILE || "var/pi-auth/auth.json"),
+    larkCli:
+      process.env.IM_BOT_LARK_CLI ||
+      firstExecutable("lark-cli", [join(homedir(), ".npm-global", "bin", "lark-cli")]),
+    provider: provider(),
+    baseUrl: process.env.IM_BOT_PI_BASE_URL || "https://ai-router.dmall.com/v1",
+    model: process.env.IM_BOT_PI_MODEL || "gpt-5.6-luna",
+    thinkingLevel: thinkingLevel(),
+    runtimeTimeoutMs: integer("IM_BOT_PI_TIMEOUT_MS", 600_000, 10_000, 1_800_000),
+    toolTimeoutMs: integer("IM_BOT_PI_TOOL_TIMEOUT_MS", 120_000, 5_000, 600_000),
+    authVerifyIntervalMs: integer("IM_BOT_PI_AUTH_VERIFY_INTERVAL_MS", 600_000, 60_000, 3_600_000),
+    allowedUserOpenId: process.env.IM_BOT_ALLOWED_USER_OPEN_ID || null,
+    maxQueue: integer("IM_BOT_PI_MAX_QUEUE", 20, 1, 1000),
+    maxInputChars: integer("IM_BOT_PI_MAX_INPUT_CHARS", 20_000, 100, 100_000),
+    maxReplyChars: integer("IM_BOT_PI_MAX_REPLY_CHARS", 12_000, 100, 50_000),
+    maxToolOutputChars: integer("IM_BOT_PI_MAX_TOOL_OUTPUT_CHARS", 100_000, 1_000, 500_000),
+    maxMessagePages: integer("IM_BOT_PI_MAX_MESSAGE_PAGES", 5, 1, 40),
+    maxTurns: integer("IM_BOT_PI_MAX_TURNS", 50, 1, 100),
+    replyOnError: boolean("IM_BOT_PI_REPLY_ON_ERROR", true),
+    processingReply:
+      process.env.IM_BOT_PI_PROCESSING_REPLY || "已收到，正在读取办公上下文并整理，请稍候。",
+    allowUserWrites: false,
+  })
+}
+
+export { projectRoot }

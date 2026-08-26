@@ -1,5 +1,7 @@
 # Feishu Codex IM Bot
 
+> 迁移状态：旧 Codex launchd 服务已停止并保留作对照。新的 TypeScript + Pi Agent Runtime 位于 [`pi_runtime/`](pi_runtime/README.md)，当前已使用真实 `gpt-5.6-luna` 并由独立 launchd 服务监听飞书消息。
+
 一个单用户、P2P-only 的飞书个人助手机器人宿主：`lark-cli` 负责实时收信和 Bot 回复，`codex exec` 负责理解问题，并通过已安装的飞书 Skills/CLI 读取当前授权用户的数据。
 
 ## 身份模型
