@@ -15,6 +15,7 @@ import {
   type Models,
 } from "@earendil-works/pi-ai"
 import { redactInternalIdentifiers, truncateText } from "../infra/safety.js"
+import { OfficeMemory } from "../memory/index.js"
 import type {
   AgentRuntime,
   LarkGateway,
@@ -37,6 +38,7 @@ interface PiRuntimeOptions {
   model: Model<Api>
   streamFn: StreamFn
   skills: RuntimeSkills
+  memory: OfficeMemory
 }
 
 function emptyUsage(): RuntimeUsage {
@@ -103,6 +105,7 @@ export class PiAgentRuntime implements AgentRuntime {
   private readonly model: Model<Api>
   private readonly streamFn: StreamFn
   private readonly skills: RuntimeSkills
+  private readonly memory: OfficeMemory
 
   constructor(options: PiRuntimeOptions) {
     this.config = options.config
@@ -111,6 +114,7 @@ export class PiAgentRuntime implements AgentRuntime {
     this.model = options.model
     this.streamFn = options.streamFn
     this.skills = options.skills
+    this.memory = options.memory
   }
 
   async check(): Promise<{ provider: string; model: string; auth: string | null }> {
@@ -124,8 +128,9 @@ export class PiAgentRuntime implements AgentRuntime {
 
   async run(request: RuntimeRequest): Promise<RuntimeResult> {
     const startedAt = Date.now()
+    this.memory.markAssistantControlConversation(request.assistantControlChatId)
     const systemPrompt = await buildSystemPrompt(this.config, this.skills, request)
-    const tools = createRuntimeTools(this.config, this.gateway, this.skills)
+    const tools = createRuntimeTools(this.config, this.gateway, this.skills, this.memory)
     const allowedTools = new Set(tools.map((tool) => tool.name))
     let turns = 0
     const invokedTools: string[] = []
@@ -198,6 +203,13 @@ export class PiAgentRuntime implements AgentRuntime {
 }
 
 export async function createLivePiRuntime(config: RuntimeConfig, gateway: LarkGateway): Promise<PiAgentRuntime> {
+  const owner = await gateway.ensureUserIdentity(config.allowedUserOpenId)
+  const memory = new OfficeMemory({
+    path: config.memoryFile,
+    ownerExternalId: owner.ownerOpenId,
+    assistantBotExternalId: owner.botAppId,
+    assistantBotName: owner.botName,
+  })
   const skills = await loadRuntimeSkills(config.projectRoot, config.skillsDir)
   if (skills.skills.length === 0) throw new Error("no dedicated runtime skills were loaded")
   const modelRuntime = createModelRuntime(config)
@@ -208,6 +220,7 @@ export async function createLivePiRuntime(config: RuntimeConfig, gateway: LarkGa
     model: modelRuntime.model,
     streamFn: modelRuntime.models.streamSimple.bind(modelRuntime.models),
     skills,
+    memory,
   })
 }
 
@@ -216,6 +229,13 @@ export async function createDemoPiRuntime(
   gateway: LarkGateway,
   now: Date,
 ): Promise<PiAgentRuntime> {
+  const owner = await gateway.ensureUserIdentity(config.allowedUserOpenId)
+  const memory = new OfficeMemory({
+    path: ":memory:",
+    ownerExternalId: owner.ownerOpenId,
+    assistantBotExternalId: owner.botAppId,
+    assistantBotName: owner.botName,
+  })
   const skills = await loadRuntimeSkills(config.projectRoot, config.skillsDir)
   const faux = fauxProvider({ provider: "faux-feishu-demo" })
   const models = createModels()
@@ -270,5 +290,6 @@ export async function createDemoPiRuntime(
     model,
     streamFn: models.streamSimple.bind(models),
     skills,
+    memory,
   })
 }

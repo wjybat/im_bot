@@ -5,6 +5,7 @@ import { loadRuntimeSkills } from "../src/agent/skills.js"
 import { createRuntimeTools } from "../src/agent/tools.js"
 import { loadConfig } from "../src/config.js"
 import { MockLarkGateway } from "../src/demo/mock-lark.js"
+import { OfficeMemory } from "../src/memory/index.js"
 
 test("offline Pi demo loads a dedicated skill, calls a read-only Lark tool, and returns evidence", async () => {
   const config = loadConfig()
@@ -34,11 +35,17 @@ test("skill discovery is confined to the Pi runtime catalog", async () => {
   assert.ok(loaded.skills.some((skill) => skill.name === "lark-shared"))
   assert.ok(loaded.skills.some((skill) => skill.name === "daily-work-brief"))
   assert.equal(loaded.diagnostics.length, 0)
-  const tools = createRuntimeTools(config, new MockLarkGateway(), loaded)
+  const memory = new OfficeMemory({ path: ":memory:", ownerExternalId: "redacted-demo-owner" })
+  const tools = createRuntimeTools(config, new MockLarkGateway(), loaded, memory)
   assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+    "get_memory_evidence",
+    "get_memory_status",
     "load_skill",
     "read_skill_file",
     "run_lark_cli",
+    "search_office_memory",
+    "sync_office_context",
   ])
   assert.equal(tools.some((tool) => /bash|shell|send|reply|auth|write/u.test(tool.name)), false)
+  memory.close()
 })

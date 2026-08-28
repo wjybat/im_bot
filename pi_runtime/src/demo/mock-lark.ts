@@ -53,6 +53,7 @@ export class MockLarkGateway implements LarkGateway {
       ownerOpenId: "redacted-demo-owner",
       ownerName: "Demo Owner",
       botName: "Pi Demo Bot",
+      botAppId: "cli_demo_bot",
       tokenStatus: "mock",
       version: "mock-lark-cli",
     }
@@ -66,6 +67,12 @@ export class MockLarkGateway implements LarkGateway {
   async searchMessages(input: unknown): Promise<unknown> {
     this.record("searchMessages", input)
     return this.messageFixture()
+  }
+
+  async getMessagesByIds(messageIds: string[]): Promise<unknown> {
+    this.record("getMessagesByIds", messageIds)
+    const fixture = this.messageFixture() as { messages: Array<Record<string, unknown>> }
+    return { messages: fixture.messages.filter((item) => messageIds.includes(String(item.message_id))) }
   }
 
   async listChatMessages(input: unknown): Promise<unknown> {

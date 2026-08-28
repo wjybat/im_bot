@@ -14,6 +14,7 @@ test(
       maxMessagePages: Math.min(base.maxMessagePages, 2),
       maxToolOutputChars: Math.min(base.maxToolOutputChars, 60_000),
       maxTurns: Math.min(base.maxTurns, 6),
+      memoryFile: ":memory:",
     }
     const gateway = new LarkCliGateway(config)
     const identity = await gateway.check(config.allowedUserOpenId)
@@ -32,8 +33,8 @@ test(
     assert.ok(result.turns >= 2, `expected a multi-turn tool-using run, got ${result.turns}`)
     assert.ok(result.tools.filter((tool) => tool === "load_skill").length >= 1, `skill was not loaded: ${result.tools.join(",")}`)
     assert.ok(
-      result.tools.includes("run_lark_cli"),
-      `Lark CLI integration tool was not selected: ${result.tools.join(",")}`,
+      result.tools.includes("sync_office_context") || result.tools.includes("run_lark_cli"),
+      `neither memory sync nor direct Lark read was selected: ${result.tools.join(",")}`,
     )
     assert.ok(result.usage.inputTokens > 0)
     assert.ok(result.reply.length >= 80)

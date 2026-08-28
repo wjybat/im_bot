@@ -16,10 +16,12 @@ export function truncateText(text: string, maxChars: number, suffix = "\n\n（�
 }
 
 export function redactInternalIdentifiers(text: string): string {
-  return text.replace(
-    /\b(?:cli|ou|oc|om|omt|on|od|ofg|file|img)_[A-Za-z0-9_-]{6,}\b/gu,
-    "[内部标识已隐藏]",
-  )
+  return text
+    .replace(
+      /\b(?:cli|ou|oc|om|omt|on|od|ofg|file|img)_[A-Za-z0-9_-]{6,}\b/gu,
+      "[内部标识已隐藏]",
+    )
+    .replace(/\bmem_[a-f0-9]{64}\b/gu, "[内部证据标识已隐藏]")
 }
 
 export function safeError(error: unknown): { type: string; message: string } {

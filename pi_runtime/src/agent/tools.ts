@@ -1,13 +1,17 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core"
 import { Type } from "@earendil-works/pi-ai"
 import { truncateText } from "../infra/safety.js"
+import { logger } from "../infra/logger.js"
+import type { OfficeMemory } from "../memory/index.js"
 import type { LarkGateway, RuntimeConfig } from "../types.js"
+import { createMemoryTools, ingestMessageToolOutput } from "./memory-tools.js"
 import type { RuntimeSkills } from "./skills.js"
 
 export function createRuntimeTools(
   config: RuntimeConfig,
   gateway: LarkGateway,
   skills: RuntimeSkills,
+  memory: OfficeMemory,
 ): AgentTool[] {
   const parameters = Type.Object({
     args: Type.Array(Type.String(), {
@@ -26,6 +30,10 @@ export function createRuntimeTools(
     executionMode: "parallel",
     async execute(_toolCallId, params, signal) {
       const output = await gateway.runReadOnlyCli(params.args, signal)
+      const memoryIngest = await ingestMessageToolOutput(memory, params.args, output.stdout).catch((error) => {
+        logger.error("office_memory_ingest_failed", error)
+        return null
+      })
       return {
         content: [
           {
@@ -36,9 +44,16 @@ export function createRuntimeTools(
         details: {
           command: params.args.slice(0, params.args[1]?.startsWith("+") ? 2 : 3),
           outputBytes: Buffer.byteLength(output.stdout),
+          ...(memoryIngest
+            ? {
+                memoryCreated: memoryIngest.created,
+                memoryUpdated: memoryIngest.updated,
+                memoryRejected: memoryIngest.rejected,
+              }
+            : {}),
         },
       }
     },
   }
-  return [skills.loadTool, skills.readFileTool, runLarkCli]
+  return [skills.loadTool, skills.readFileTool, ...createMemoryTools(config, gateway, memory), runLarkCli]
 }

@@ -81,6 +81,7 @@ export function loadConfig(): RuntimeConfig {
     systemPromptFile: resolve(projectRoot, "runtime", "system.md"),
     stateFile: resolve(projectRoot, "var", "processed-messages.json"),
     usageLedgerFile: resolve(projectRoot, "var", "usage-ledger.jsonl"),
+    memoryFile: resolve(projectRoot, process.env.IM_BOT_PI_MEMORY_FILE || "var/office-memory.db"),
     authFile: resolve(projectRoot, process.env.IM_BOT_PI_AUTH_FILE || "var/pi-auth/auth.json"),
     larkCli:
       process.env.IM_BOT_LARK_CLI ||

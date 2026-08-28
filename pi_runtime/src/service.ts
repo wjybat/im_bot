@@ -26,6 +26,7 @@ export function validateIncomingEvent(
   if (event.chat_type !== "p2p" || event.sender_type !== "user") return null
   if (event.sender_id !== ownerOpenId) return null
   if (typeof event.message_id !== "string" || !event.message_id.startsWith("om_")) return null
+  if (typeof event.chat_id !== "string" || event.chat_id.trim() === "") return null
   if (typeof event.content !== "string") return null
   if (event.message_type !== "text" && event.message_type !== "post") return null
   const content = truncateText(event.content, maxInputChars)
@@ -35,6 +36,7 @@ export function validateIncomingEvent(
     content,
     messageType: event.message_type,
     createTime: typeof event.create_time === "string" ? event.create_time : null,
+    chatId: event.chat_id,
     receivedAt: new Date().toISOString(),
   }
 }
@@ -191,6 +193,7 @@ export class PiBotService {
         text: message.content,
         requestId: hash,
         sessionId: `feishu-owner-${hashIdentifier(this.owner?.ownerOpenId ?? "owner")}`,
+        assistantControlChatId: message.chatId,
       })
       telemetry = result
       runtimeCompleted = true

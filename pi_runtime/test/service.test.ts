@@ -13,6 +13,7 @@ test("owner P2P text is accepted and source create time is retained", () => {
         message_type: "text",
         content: "hello",
         create_time: "1787620000000",
+        chat_id: "oc_assistant",
       },
       "owner",
       100,
@@ -22,6 +23,7 @@ test("owner P2P text is accepted and source create time is retained", () => {
   assert.equal(accepted.content, "hello")
   assert.equal(accepted.messageType, "text")
   assert.equal(accepted.createTime, "1787620000000")
+  assert.equal(accepted.chatId, "oc_assistant")
   assert.ok(Number.isFinite(Date.parse(accepted.receivedAt)))
 })
 
@@ -33,17 +35,23 @@ test("other users, groups, bots, and unsupported content are rejected", () => {
     message_id: "om_valid",
     message_type: "text",
     content: "hello",
+    chat_id: "oc_assistant",
   }
   assert.equal(validateIncomingEvent({ ...base, sender_id: "other" }, "owner", 100), null)
   assert.equal(validateIncomingEvent({ ...base, chat_type: "group" }, "owner", 100), null)
   assert.equal(validateIncomingEvent({ ...base, sender_type: "bot" }, "owner", 100), null)
   assert.equal(validateIncomingEvent({ ...base, message_type: "file" }, "owner", 100), null)
+  assert.equal(validateIncomingEvent({ ...base, chat_id: undefined }, "owner", 100), null)
 })
 
 test("host redacts Feishu internal identifiers from final text", () => {
   assert.equal(
     redactInternalIdentifiers("chat oc_12345678 message om_abcdefgh sender ou_abcdefgh"),
     "chat [内部标识已隐藏] message [内部标识已隐藏] sender [内部标识已隐藏]",
+  )
+  assert.equal(
+    redactInternalIdentifiers(`evidence mem_${"a".repeat(64)}`),
+    "evidence [内部证据标识已隐藏]",
   )
 })
 

@@ -6,6 +6,7 @@ export interface RuntimeConfig {
   systemPromptFile: string
   stateFile: string
   usageLedgerFile: string
+  memoryFile: string
   authFile: string
   larkCli: string
   provider: "dmall-ai" | "openai" | "anthropic" | "openai-codex"
@@ -49,6 +50,7 @@ export interface RuntimeRequest {
   requestId: string
   sessionId: string
   now?: Date
+  assistantControlChatId?: string | null
 }
 
 export interface RuntimeUsage {
@@ -82,6 +84,7 @@ export interface OwnerIdentity {
   ownerOpenId: string
   ownerName: string | null
   botName: string | null
+  botAppId: string | null
   tokenStatus: string | null
 }
 
@@ -101,6 +104,7 @@ export interface AcceptedMessage {
   content: string
   messageType: "text" | "post"
   createTime: string | null
+  chatId: string
   receivedAt: string
 }
 
@@ -126,6 +130,7 @@ export interface LarkGateway {
     chatType?: "p2p" | "group"
     pageLimit: number
   }, signal?: AbortSignal): Promise<unknown>
+  getMessagesByIds(messageIds: string[], signal?: AbortSignal): Promise<unknown>
   listChatMessages(input: {
     chatId: string
     start?: string

@@ -16,6 +16,9 @@
 - Runtime 超时、最大 turn、分页、工具输出和回复长度上限。
 - Pi Token、缓存 Token、工具轨迹和基于官方价格的参考成本统计。
 - 每条飞书消息一条聚合 Token/成本台账，记录成功、Runtime 失败和最终回复失败产生的实际用量。
+- 单进程 SQLite 办公记忆：原始响应、规范化会话/消息、revision、Outbox、独立 FTS 游标和全文检索。
+- `get_memory_status`、`sync_office_context`、`search_office_memory`、`get_memory_evidence` 四个通用记忆工具；历史问题优先检索记忆，时效性问题按需增量回源飞书。
+- 防污染硬闸：用户与办公助手的控制私聊、Agent 自产内容、空内容和禁用会话不会进入办公 FTS，规则不依赖模型提示词。
 
 ## 验证
 
@@ -115,7 +118,8 @@ npm run service:uninstall
 src/adapters/lark-cli.ts  飞书 CLI、User/Bot 身份与事件连接
 src/service.ts            Owner 闸、队列、去重、刷新、回复
 src/agent/pi-runtime.ts   Pi Agent 生命周期、turn/timeout/usage
-src/agent/tools.ts        load/read/run 三个通用受控工具
+src/agent/tools.ts        Skill、记忆和 Lark CLI 通用受控工具
+src/memory/               SQLite 证据库、规范化、准入守卫、Outbox 与 FTS
 runtime/system.md         Runtime 身份、安全和自主规划提示词
 runtime/skills/integrations/lark/  版本化的飞书集成 Skills
 runtime/skills/workflows/          稳定可复用的业务工作流 Skills
@@ -126,6 +130,26 @@ src/demo/                 无外部写入的离线流程
 Pi 没有获得通用 Bash、文件编辑或飞书写工具。`run_lark_cli` 会在执行前读取命令声明的 Risk，仅允许 `Risk: read`、Schema、事件元数据和通用 GET；写命令、认证变更、事件消费者和 `--yes` 会被宿主拒绝。模型不能直接发送回复；唯一远端写入路径仍是宿主的 `replyToMessage()`。
 
 默认单次请求最多允许 50 个 Agent turn（可通过 `IM_BOT_PI_MAX_TURNS` 配置到 100），同时仍受 10 分钟 Runtime 总超时约束。
+
+## 办公上下文记忆
+
+第一阶段记忆数据库默认位于：
+
+```text
+var/office-memory.db
+```
+
+数据库文件权限为 `0600`，目录已被 Git 忽略。每次 `sync_office_context` 或受支持的 IM 只读命令返回消息后，宿主会在同一事务中保存原始响应、规范化消息和 Outbox 变更，再由独立游标增量更新 FTS。相同消息重复拉取不会重复入库；编辑后的内容会递增 revision 并替换搜索索引。
+
+本地记忆是飞书数据的可检索镜像，不是最终事实源。Agent 会根据问题时效决定是否先同步飞书；记忆缺失、过期或需要完整话题上下文时仍可直接调用 Lark 只读工具。当前只实现证据层和全文检索，尚未进行 LLM 事实抽取、Entity/Fact 图结构和长期事实合并。
+
+防污染策略在数据库写入层执行：
+
+- 收到 owner 的 P2P 指令时，宿主先把当前 chat 标记为 `assistant_control`；该会话里用户和 Bot 的所有消息均不可检索。
+- 本地 `once` 等没有事件 chat_id 的路径优先用当前应用 ID 识别自己的 P2P Bot 会话；取不到应用 ID 时，只在应用名称能唯一精确匹配一个会话时保守回填，匹配不唯一时不猜测。
+- 显式标记为 `origin=agent` 的内容永久排除。
+- 空消息、Bot/告警会话和关闭学习的会话具有独立拒绝原因，为后续范围治理保留审计能力。
+- 原始响应可以保留用于解析重放，但只有通过准入守卫的消息进入 FTS 和 Agent 证据检索。
 
 ## Token 与成本台账
 
@@ -142,7 +166,7 @@ GPT-5.6 Luna 的参考价格从 `.env` 读取。默认采用 OpenAI 官方公开
 ## 当前生产化缺口
 
 - Mac 睡眠时本地长连接仍会暂停；尚未实现唤醒后的消息补拉 checkpoint。
-- 当前会话按请求隔离，尚未接入长期会话/SQLite 和记忆压缩策略。
+- 当前已接入消息证据级 SQLite 记忆，但尚未实现后台周期同步、日历/任务规范化、事实抽取、图关系、语义向量和长期事实压缩。
 - JSON 凭据存储只做进程内串行和原子替换，生产多进程部署需要跨进程文件锁或密钥服务。
 - 日历读取权限当前可能缺失；Agent 会把它当可选来源并继续使用消息/任务。
 - 已有处理中回执；尚未加入流式增量回答、失败分类卡片、重试队列和死信队列。

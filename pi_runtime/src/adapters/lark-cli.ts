@@ -156,10 +156,20 @@ export class LarkCliGateway implements LarkGateway {
     if (expectedOwnerOpenId !== null && expectedOwnerOpenId !== user.openId) {
       throw new Error("authorized Lark user changed; refusing to cross the owner boundary")
     }
+    let botAppId = typeof bot.appId === "string" ? bot.appId : null
+    if (botAppId === null) {
+      try {
+        const effectiveBot = asRecord(await this.run(["whoami", "--as", "bot"]))
+        if (typeof effectiveBot?.appId === "string") botAppId = effectiveBot.appId
+      } catch {
+        // The app id is a pollution-guard enhancement. Event chat_id remains authoritative.
+      }
+    }
     return {
       ownerOpenId: user.openId,
       ownerName: typeof user.userName === "string" ? user.userName : null,
       botName: typeof bot.appName === "string" ? bot.appName : null,
+      botAppId,
       tokenStatus: typeof user.tokenStatus === "string" ? user.tokenStatus : null,
     }
   }
@@ -210,6 +220,29 @@ export class LarkCliGateway implements LarkGateway {
     ]
     if (input.chatType) args.push("--chat-type", input.chatType)
     return dataFromEnvelope(await this.run(args, { ...(signal ? { signal } : {}) }))
+  }
+
+  async getMessagesByIds(messageIds: string[], signal?: AbortSignal): Promise<unknown> {
+    const unique = [...new Set(messageIds)].filter((id) => id.trim() !== "")
+    if (unique.length === 0 || unique.length > 50) {
+      throw new Error("message hydration requires 1 to 50 message ids")
+    }
+    return dataFromEnvelope(
+      await this.run(
+        [
+          "im",
+          "+messages-mget",
+          "--as",
+          "user",
+          "--message-ids",
+          unique.join(","),
+          "--no-reactions",
+          "--format",
+          "json",
+        ],
+        { ...(signal ? { signal } : {}) },
+      ),
+    )
   }
 
   async listChatMessages(
