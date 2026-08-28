@@ -21,6 +21,7 @@ import type {
   RuntimeConfig,
   RuntimeRequest,
   RuntimeResult,
+  RuntimeTelemetry,
   RuntimeUsage,
 } from "../types.js"
 import { createModelRuntime } from "./model.js"
@@ -44,7 +45,12 @@ function emptyUsage(): RuntimeUsage {
     outputTokens: 0,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
+    reasoningTokens: 0,
     totalTokens: 0,
+    inputCostUsd: 0,
+    outputCostUsd: 0,
+    cacheReadCostUsd: 0,
+    cacheWriteCostUsd: 0,
     estimatedCostUsd: 0,
   }
 }
@@ -57,10 +63,22 @@ function aggregateUsage(messages: readonly AgentMessage[]): RuntimeUsage {
     result.outputTokens += message.usage.output
     result.cacheReadTokens += message.usage.cacheRead
     result.cacheWriteTokens += message.usage.cacheWrite
+    result.reasoningTokens += message.usage.reasoning ?? 0
     result.totalTokens += message.usage.totalTokens
+    result.inputCostUsd += message.usage.cost.input
+    result.outputCostUsd += message.usage.cost.output
+    result.cacheReadCostUsd += message.usage.cost.cacheRead
+    result.cacheWriteCostUsd += message.usage.cost.cacheWrite
     result.estimatedCostUsd += message.usage.cost.total
   }
   return result
+}
+
+export class PiRuntimeExecutionError extends Error {
+  constructor(message: string, readonly telemetry: RuntimeTelemetry, options?: ErrorOptions) {
+    super(message, options)
+    this.name = "PiRuntimeExecutionError"
+  }
 }
 
 function finalReply(messages: readonly AgentMessage[]): string {
@@ -142,25 +160,39 @@ export class PiAgentRuntime implements AgentRuntime {
       agent.abort()
     }, this.config.runtimeTimeoutMs)
     timer.unref()
-    try {
-      await agent.prompt(`USER_MESSAGE_JSON:\n${JSON.stringify({ text: request.text })}`)
-      await agent.waitForIdle()
-    } finally {
-      clearTimeout(timer)
-    }
-    if (timedOut) throw new Error(`Pi runtime exceeded ${this.config.runtimeTimeoutMs} ms`)
-    if (turns >= this.config.maxTurns) {
-      const last = [...agent.state.messages].reverse().find((message) => message.role === "assistant")
-      if (last?.role === "assistant" && last.stopReason === "toolUse") {
-        throw new Error(`Pi runtime exceeded ${this.config.maxTurns} turns without a final answer`)
-      }
-    }
-    return {
-      reply: truncateText(redactInternalIdentifiers(finalReply(agent.state.messages)), this.config.maxReplyChars),
+    const telemetry = (): RuntimeTelemetry => ({
       usage: aggregateUsage(agent.state.messages),
       durationMs: Date.now() - startedAt,
       turns,
-      tools: invokedTools,
+      tools: [...invokedTools],
+      provider: this.model.provider,
+      model: this.model.id,
+    })
+    try {
+      await agent.prompt(`USER_MESSAGE_JSON:\n${JSON.stringify({ text: request.text })}`)
+      await agent.waitForIdle()
+      if (timedOut) throw new Error(`Pi runtime exceeded ${this.config.runtimeTimeoutMs} ms`)
+      if (turns >= this.config.maxTurns) {
+        const last = [...agent.state.messages].reverse().find((message) => message.role === "assistant")
+        if (last?.role === "assistant" && last.stopReason === "toolUse") {
+          throw new Error(`Pi runtime exceeded ${this.config.maxTurns} turns without a final answer`)
+        }
+      }
+      return {
+        ...telemetry(),
+        reply: truncateText(redactInternalIdentifiers(finalReply(agent.state.messages)), this.config.maxReplyChars),
+      }
+    } catch (error) {
+      const message = timedOut
+        ? `Pi runtime exceeded ${this.config.runtimeTimeoutMs} ms`
+        : error instanceof Error
+          ? error.message
+          : String(error)
+      throw new PiRuntimeExecutionError(message, telemetry(), {
+        cause: error,
+      })
+    } finally {
+      clearTimeout(timer)
     }
   }
 }

@@ -1,6 +1,8 @@
 import { logger } from "./infra/logger.js"
 import { ProcessedMessageStore } from "./infra/state.js"
 import { hashIdentifier, sleep, truncateText } from "./infra/safety.js"
+import { UsageLedger, type UsageLedgerStatus } from "./infra/usage-ledger.js"
+import { PiRuntimeExecutionError } from "./agent/pi-runtime.js"
 import type {
   AcceptedMessage,
   AgentRuntime,
@@ -9,6 +11,8 @@ import type {
   MessageConsumer,
   OwnerIdentity,
   RuntimeConfig,
+  RuntimeTelemetry,
+  RuntimeUsage,
 } from "./types.js"
 
 const genericErrorReply = "处理这条请求时遇到错误，请稍后再试。"
@@ -31,11 +35,29 @@ export function validateIncomingEvent(
     content,
     messageType: event.message_type,
     createTime: typeof event.create_time === "string" ? event.create_time : null,
+    receivedAt: new Date().toISOString(),
+  }
+}
+
+function zeroUsage(): RuntimeUsage {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    totalTokens: 0,
+    inputCostUsd: 0,
+    outputCostUsd: 0,
+    cacheReadCostUsd: 0,
+    cacheWriteCostUsd: 0,
+    estimatedCostUsd: 0,
   }
 }
 
 export class PiBotService {
   private readonly store: ProcessedMessageStore
+  private readonly usageLedger: UsageLedger
   private owner: OwnerIdentity | null = null
   private readonly pending: AcceptedMessage[] = []
   private readonly inFlight = new Set<string>()
@@ -52,6 +74,7 @@ export class PiBotService {
     private readonly runtime: AgentRuntime,
   ) {
     this.store = new ProcessedMessageStore(config.stateFile)
+    this.usageLedger = new UsageLedger(config.usageLedgerFile)
   }
 
   async check(): Promise<Record<string, unknown>> {
@@ -150,6 +173,18 @@ export class PiBotService {
   private async processMessage(message: AcceptedMessage): Promise<void> {
     const hash = hashIdentifier(message.messageId)
     const startedAt = Date.now()
+    let runtimeCompleted = false
+    let finalReplyDelivered = false
+    let status: UsageLedgerStatus = "host_failed"
+    let errorType: string | undefined
+    let telemetry: RuntimeTelemetry = {
+      usage: zeroUsage(),
+      durationMs: 0,
+      turns: 0,
+      tools: [],
+      provider: this.config.provider,
+      model: this.config.model ?? "unknown",
+    }
     try {
       await this.verifyUserAuth()
       const result = await this.runtime.run({
@@ -157,8 +192,12 @@ export class PiBotService {
         requestId: hash,
         sessionId: `feishu-owner-${hashIdentifier(this.owner?.ownerOpenId ?? "owner")}`,
       })
+      telemetry = result
+      runtimeCompleted = true
       await this.gateway.replyToMessage(message.messageId, result.reply, "final")
+      finalReplyDelivered = true
       await this.store.mark(message.messageId)
+      status = "success"
       logger.info("message_processed", {
         message: hash,
         durationMs: Date.now() - startedAt,
@@ -168,9 +207,18 @@ export class PiBotService {
         inputTokens: result.usage.inputTokens,
         outputTokens: result.usage.outputTokens,
         cacheReadTokens: result.usage.cacheReadTokens,
+        cacheWriteTokens: result.usage.cacheWriteTokens,
+        reasoningTokens: result.usage.reasoningTokens,
         estimatedCostUsd: result.usage.estimatedCostUsd,
       })
     } catch (error) {
+      errorType = error instanceof Error ? error.name : "unknown"
+      if (error instanceof PiRuntimeExecutionError) {
+        telemetry = error.telemetry
+        status = "runtime_failed"
+      } else if (runtimeCompleted) {
+        status = "delivery_failed"
+      }
       logger.error("message_processing_failed", error, { message: hash, durationMs: Date.now() - startedAt })
       if (this.config.replyOnError) {
         try {
@@ -180,6 +228,27 @@ export class PiBotService {
         }
       }
     } finally {
+      try {
+        await this.usageLedger.append({
+          message: hash,
+          status,
+          receivedAt: message.receivedAt,
+          completedAt: new Date().toISOString(),
+          totalDurationMs: Date.now() - startedAt,
+          telemetry,
+          pricing: this.config.pricing,
+          finalReplyDelivered,
+          ...(errorType ? { errorType } : {}),
+        })
+        logger.info("usage_ledger_recorded", {
+          message: hash,
+          status,
+          totalTokens: telemetry.usage.totalTokens,
+          estimatedCostUsd: telemetry.usage.estimatedCostUsd,
+        })
+      } catch (ledgerError) {
+        logger.error("usage_ledger_write_failed", ledgerError, { message: hash })
+      }
       this.inFlight.delete(message.messageId)
     }
   }

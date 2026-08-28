@@ -5,6 +5,7 @@ export interface RuntimeConfig {
   skillsDir: string
   systemPromptFile: string
   stateFile: string
+  usageLedgerFile: string
   authFile: string
   larkCli: string
   provider: "dmall-ai" | "openai" | "anthropic" | "openai-codex"
@@ -23,7 +24,24 @@ export interface RuntimeConfig {
   maxTurns: number
   replyOnError: boolean
   processingReply: string
+  pricing: PricingConfig
   allowUserWrites: false
+}
+
+export interface PriceRates {
+  input: number
+  cacheRead: number
+  cacheWrite: number
+  output: number
+}
+
+export interface PricingConfig {
+  currency: "USD"
+  source: string
+  asOf: string
+  longContextThreshold: number
+  standard: PriceRates
+  longContext: PriceRates
 }
 
 export interface RuntimeRequest {
@@ -38,16 +56,26 @@ export interface RuntimeUsage {
   outputTokens: number
   cacheReadTokens: number
   cacheWriteTokens: number
+  reasoningTokens: number
   totalTokens: number
+  inputCostUsd: number
+  outputCostUsd: number
+  cacheReadCostUsd: number
+  cacheWriteCostUsd: number
   estimatedCostUsd: number
 }
 
-export interface RuntimeResult {
-  reply: string
+export interface RuntimeTelemetry {
   usage: RuntimeUsage
   durationMs: number
   turns: number
   tools: string[]
+  provider: string
+  model: string
+}
+
+export interface RuntimeResult extends RuntimeTelemetry {
+  reply: string
 }
 
 export interface OwnerIdentity {
@@ -73,6 +101,7 @@ export interface AcceptedMessage {
   content: string
   messageType: "text" | "post"
   createTime: string | null
+  receivedAt: string
 }
 
 export interface MessageConsumer {

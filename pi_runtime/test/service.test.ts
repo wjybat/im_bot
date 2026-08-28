@@ -4,8 +4,7 @@ import { validateIncomingEvent } from "../src/service.js"
 import { redactInternalIdentifiers, replyIdempotencyKey } from "../src/infra/safety.js"
 
 test("owner P2P text is accepted and source create time is retained", () => {
-  assert.deepEqual(
-    validateIncomingEvent(
+  const accepted = validateIncomingEvent(
       {
         chat_type: "p2p",
         sender_type: "user",
@@ -17,14 +16,13 @@ test("owner P2P text is accepted and source create time is retained", () => {
       },
       "owner",
       100,
-    ),
-    {
-      messageId: "om_valid",
-      content: "hello",
-      messageType: "text",
-      createTime: "1787620000000",
-    },
-  )
+    )
+  assert.ok(accepted)
+  assert.equal(accepted.messageId, "om_valid")
+  assert.equal(accepted.content, "hello")
+  assert.equal(accepted.messageType, "text")
+  assert.equal(accepted.createTime, "1787620000000")
+  assert.ok(Number.isFinite(Date.parse(accepted.receivedAt)))
 })
 
 test("other users, groups, bots, and unsupported content are rejected", () => {

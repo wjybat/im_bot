@@ -37,6 +37,16 @@ function integer(name: string, fallback: number, min: number, max: number): numb
   return value
 }
 
+function decimal(name: string, fallback: number, min = 0, max = 1_000_000): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw === "") return fallback
+  const value = Number(raw)
+  if (!Number.isFinite(value) || value < min || value > max) {
+    throw new Error(`${name} must be a number between ${min} and ${max}`)
+  }
+  return value
+}
+
 function boolean(name: string, fallback: boolean): boolean {
   const raw = process.env[name]
   if (raw === undefined || raw === "") return fallback
@@ -70,6 +80,7 @@ export function loadConfig(): RuntimeConfig {
     skillsDir: resolve(projectRoot, "runtime", "skills"),
     systemPromptFile: resolve(projectRoot, "runtime", "system.md"),
     stateFile: resolve(projectRoot, "var", "processed-messages.json"),
+    usageLedgerFile: resolve(projectRoot, "var", "usage-ledger.jsonl"),
     authFile: resolve(projectRoot, process.env.IM_BOT_PI_AUTH_FILE || "var/pi-auth/auth.json"),
     larkCli:
       process.env.IM_BOT_LARK_CLI ||
@@ -91,6 +102,26 @@ export function loadConfig(): RuntimeConfig {
     replyOnError: boolean("IM_BOT_PI_REPLY_ON_ERROR", true),
     processingReply:
       process.env.IM_BOT_PI_PROCESSING_REPLY || "已收到，正在读取办公上下文并整理，请稍候。",
+    pricing: {
+      currency: "USD" as const,
+      source:
+        process.env.IM_BOT_PI_PRICE_SOURCE ||
+        "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
+      asOf: process.env.IM_BOT_PI_PRICE_AS_OF || "2026-08-26",
+      longContextThreshold: integer("IM_BOT_PI_PRICE_LONG_CONTEXT_THRESHOLD", 272_000, 1, 10_000_000),
+      standard: {
+        input: decimal("IM_BOT_PI_PRICE_INPUT_PER_MILLION", 0.2),
+        cacheRead: decimal("IM_BOT_PI_PRICE_CACHE_READ_PER_MILLION", 0.02),
+        cacheWrite: decimal("IM_BOT_PI_PRICE_CACHE_WRITE_PER_MILLION", 0.25),
+        output: decimal("IM_BOT_PI_PRICE_OUTPUT_PER_MILLION", 1.2),
+      },
+      longContext: {
+        input: decimal("IM_BOT_PI_PRICE_LONG_INPUT_PER_MILLION", 0.4),
+        cacheRead: decimal("IM_BOT_PI_PRICE_LONG_CACHE_READ_PER_MILLION", 0.04),
+        cacheWrite: decimal("IM_BOT_PI_PRICE_LONG_CACHE_WRITE_PER_MILLION", 0.5),
+        output: decimal("IM_BOT_PI_PRICE_LONG_OUTPUT_PER_MILLION", 1.8),
+      },
+    },
     allowUserWrites: false,
   })
 }

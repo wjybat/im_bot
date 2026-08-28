@@ -14,7 +14,8 @@
 - Owner-only P2P 输入闸、串行队列、消息 ID 去重、幂等回复、定期用户凭据验证。
 - 收到消息后立即发送“正在读取办公上下文”回执；处理完成后再发送最终回答。
 - Runtime 超时、最大 turn、分页、工具输出和回复长度上限。
-- Pi Token、缓存 Token 和工具轨迹日志；自定义路由价格未配置前不虚构成本。
+- Pi Token、缓存 Token、工具轨迹和基于官方价格的参考成本统计。
+- 每条飞书消息一条聚合 Token/成本台账，记录成功、Runtime 失败和最终回复失败产生的实际用量。
 
 ## 验证
 
@@ -125,6 +126,18 @@ src/demo/                 无外部写入的离线流程
 Pi 没有获得通用 Bash、文件编辑或飞书写工具。`run_lark_cli` 会在执行前读取命令声明的 Risk，仅允许 `Risk: read`、Schema、事件元数据和通用 GET；写命令、认证变更、事件消费者和 `--yes` 会被宿主拒绝。模型不能直接发送回复；唯一远端写入路径仍是宿主的 `replyToMessage()`。
 
 默认单次请求最多允许 50 个 Agent turn（可通过 `IM_BOT_PI_MAX_TURNS` 配置到 100），同时仍受 10 分钟 Runtime 总超时约束。
+
+## Token 与成本台账
+
+Pi 从 OpenAI Responses usage 中读取普通输入、缓存读取、缓存写入、输出和 reasoning Token。项目不会保存逐 turn 台账，只在每条飞书消息完成后把所有 turns 汇总为一条记录：
+
+```text
+var/usage-ledger.jsonl
+```
+
+台账文件权限为 `0600`，不包含消息正文或原始消息 ID。每条记录包括请求哈希、成功/失败状态、模型、总 turns、工具调用次数、聚合 Token、分项成本、总成本、价格快照和最终回复是否送达。
+
+GPT-5.6 Luna 的参考价格从 `.env` 读取。默认采用 OpenAI 官方公开价格；DMall AI Router 未在 `/models` 返回价格，因此台账成本标记为 `reference_estimate`，不代表 DMall 内部实际结算账单。
 
 ## 当前生产化缺口
 

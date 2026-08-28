@@ -29,7 +29,21 @@ export function createConfiguredModels(config: RuntimeConfig): Models {
       baseUrl: config.baseUrl,
       reasoning: true,
       input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      cost: {
+        input: config.pricing.standard.input,
+        output: config.pricing.standard.output,
+        cacheRead: config.pricing.standard.cacheRead,
+        cacheWrite: config.pricing.standard.cacheWrite,
+        tiers: [
+          {
+            inputTokensAbove: config.pricing.longContextThreshold,
+            input: config.pricing.longContext.input,
+            output: config.pricing.longContext.output,
+            cacheRead: config.pricing.longContext.cacheRead,
+            cacheWrite: config.pricing.longContext.cacheWrite,
+          },
+        ],
+      },
       contextWindow: 272_000,
       maxTokens: 32_768,
       compat: {
