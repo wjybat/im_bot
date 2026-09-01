@@ -7,6 +7,18 @@ export interface RuntimeConfig {
   stateFile: string
   usageLedgerFile: string
   memoryFile: string
+  memoryExtractionThinking: ThinkingLevel
+  memoryExtractionTimeoutMs: number
+  memoryExtractionMaxOutputTokens: number
+  memoryChunkIdleGapMs: number
+  memoryChunkMaxTokens: number
+  memoryChunkMaxMessages: number
+  memoryContextMessages: number
+  memoryExtractionMaxChunks: number
+  memoryExtractionMaxAttempts: number
+  memoryHybridTokenBudget: number
+  memoryPrepareMaxWindows: number
+  memoryPrepareMinWindowMs: number
   authFile: string
   larkCli: string
   provider: "dmall-ai" | "openai" | "anthropic" | "openai-codex"

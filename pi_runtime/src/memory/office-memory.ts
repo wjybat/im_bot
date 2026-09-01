@@ -15,6 +15,7 @@ import {
 import type {
   LarkPayloadInspection,
   MemoryEvidence,
+  MemoryCoverage,
   MemoryIngestContext,
   MemoryIngestResult,
   MemorySearchHit,
@@ -25,6 +26,7 @@ import type {
 } from "./types.js"
 
 const FTS_CONSUMER_ID = "local-index-fts"
+const SEMANTIC_CONSUMER_ID = "semantic-enrichment"
 
 type SqlRow = Record<string, unknown>
 
@@ -172,6 +174,10 @@ export class OfficeMemory {
       `INSERT OR IGNORE INTO memory_consumer_cursors
        (consumer_id, owner_key, acked_seq, updated_at) VALUES (?, ?, 0, ?)`,
     ).run(FTS_CONSUMER_ID, this.ownerKey, Date.now())
+    this.db.prepare(
+      `INSERT OR IGNORE INTO memory_consumer_cursors
+       (consumer_id, owner_key, acked_seq, updated_at) VALUES (?, ?, 0, ?)`,
+    ).run(SEMANTIC_CONSUMER_ID, this.ownerKey, Date.now())
     if (options.path !== ":memory:") chmodSync(options.path, 0o600)
     this.discoverExistingAssistantControlConversation()
   }
@@ -249,13 +255,14 @@ export class OfficeMemory {
       }
 
       const messages = this.db.prepare(
-        `SELECT id, source_digest FROM memory_messages
+        `SELECT id, source_digest, revision FROM memory_messages
          WHERE owner_key = ? AND conversation_id = ?
            AND (learning_eligible <> 0 OR rejection_reason IS NOT 'assistant_control')`,
       ).all(this.ownerKey, conversationId)
       for (const value of messages) {
-        const message = row<{ id: string; source_digest: string }>(value)
+        const message = row<{ id: string; source_digest: string; revision: number }>(value)
         if (message === null) continue
+        this.invalidateCurrentFactsForMessage(message.id, message.revision, now)
         this.db.prepare(
           `UPDATE memory_messages
            SET learning_eligible = 0, rejection_reason = 'assistant_control', updated_local_at = ?
@@ -264,6 +271,7 @@ export class OfficeMemory {
         this.emitChange("message", message.id, now, now, null, sha256Text(`${message.source_digest}:control`))
         affected += 1
       }
+      this.invalidateCurrentFactsForConversation(conversationId, now)
       this.emitChange("conversation", conversationId, now, now, null, sha256Text(`${conversationId}:control`))
       this.db.exec("COMMIT")
     } catch (error) {
@@ -361,6 +369,7 @@ export class OfficeMemory {
     const fullSync = row<{ range_start: number | null; range_end: number | null }>(this.db.prepare(
       `SELECT range_start, range_end FROM memory_sync_runs
        WHERE owner_key = ? AND status = 'success' AND coverage_complete = 1
+         AND COALESCE(query, '') = '' AND chat_type IS NULL
        ORDER BY completed_at DESC LIMIT 1`,
     ).get(this.ownerKey))
     const lastSuccessfulSyncAt = row<{ value: number | null }>(this.db.prepare(
@@ -374,6 +383,20 @@ export class OfficeMemory {
       `SELECT acked_seq AS value FROM memory_consumer_cursors
        WHERE consumer_id = ? AND owner_key = ?`,
     ).get(FTS_CONSUMER_ID, this.ownerKey))?.value)
+    const semanticMessageHead = numeric(row<{ value: number }>(this.db.prepare(
+      `SELECT COALESCE(MAX(seq), 0) AS value FROM memory_knowledge_changelog
+       WHERE owner_key = ? AND entity_type = 'message'`,
+    ).get(this.ownerKey))?.value)
+    const semanticAcked = numeric(row<{ value: number }>(this.db.prepare(
+      `SELECT acked_seq AS value FROM memory_consumer_cursors
+       WHERE consumer_id = ? AND owner_key = ?`,
+    ).get(SEMANTIC_CONSUMER_ID, this.ownerKey))?.value)
+    const extractionUsage = row<{ tokens: number; cost: number; failures: number }>(this.db.prepare(
+      `SELECT COALESCE(SUM(total_tokens), 0) AS tokens,
+              COALESCE(SUM(estimated_cost_usd), 0) AS cost,
+              COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failures
+       FROM memory_extraction_runs WHERE owner_key = ?`,
+    ).get(this.ownerKey))
     return {
       schemaVersion: OFFICE_MEMORY_SCHEMA_VERSION,
       rawRecords: countOf(this.db, "SELECT COUNT(*) AS count FROM memory_raw_records WHERE owner_key = ?", this.ownerKey),
@@ -394,6 +417,23 @@ export class OfficeMemory {
         "SELECT COUNT(*) AS count FROM memory_messages WHERE owner_key = ? AND learning_eligible = 0",
         this.ownerKey,
       ),
+      chunks: countOf(this.db, "SELECT COUNT(*) AS count FROM memory_chunks WHERE owner_key = ?", this.ownerKey),
+      pendingChunks: countOf(
+        this.db,
+        "SELECT COUNT(*) AS count FROM memory_chunks WHERE owner_key = ? AND status IN ('pending', 'failed')",
+        this.ownerKey,
+      ),
+      facts: countOf(this.db, "SELECT COUNT(*) AS count FROM memory_facts WHERE owner_key = ?", this.ownerKey),
+      currentFacts: countOf(
+        this.db,
+        "SELECT COUNT(*) AS count FROM memory_facts WHERE owner_key = ? AND is_current = 1",
+        this.ownerKey,
+      ),
+      entities: countOf(this.db, "SELECT COUNT(*) AS count FROM memory_entities WHERE owner_key = ?", this.ownerKey),
+      edges: countOf(this.db, "SELECT COUNT(*) AS count FROM memory_edges WHERE owner_key = ?", this.ownerKey),
+      factExtractionTokens: numeric(extractionUsage?.tokens),
+      factExtractionCostUsd: numeric(extractionUsage?.cost),
+      failedExtractions: numeric(extractionUsage?.failures),
       latestMessageAt: latest === null ? null : isoShanghai(numeric(latest)),
       fullSyncFrom:
         fullSync?.range_start === null || fullSync?.range_start === undefined
@@ -408,6 +448,9 @@ export class OfficeMemory {
       changelogHead: head,
       ftsAckedSeq: acked,
       ftsLag: Math.max(0, head - acked),
+      semanticMessageHead,
+      semanticAckedSeq: semanticAcked,
+      semanticLag: Math.max(0, semanticMessageHead - semanticAcked),
     }
   }
 
@@ -438,6 +481,76 @@ export class OfficeMemory {
       input.chatType ?? null,
       input.coverageComplete ? 1 : 0,
     )
+  }
+
+  coverageFor(
+    start: string,
+    end: string,
+    query = "",
+    chatType?: "p2p" | "group",
+  ): MemoryCoverage {
+    this.assertOpen()
+    const startAt = parseBoundary(start, "start")
+    const endAt = parseBoundary(end, "end")
+    if (startAt === null || endAt === null || startAt > endAt) {
+      throw new Error("coverage range is invalid")
+    }
+    const values = chatType === undefined
+      ? this.db.prepare(
+          `SELECT range_start, range_end FROM memory_sync_runs
+           WHERE owner_key = ? AND source = 'lark-sync' AND status = 'success'
+             AND coverage_complete = 1 AND COALESCE(query, '') = ? AND chat_type IS NULL
+             AND range_end >= ? AND range_start <= ?
+           ORDER BY range_start ASC, range_end ASC`,
+        ).all(this.ownerKey, query, startAt, endAt)
+      : this.db.prepare(
+          `SELECT range_start, range_end FROM memory_sync_runs
+           WHERE owner_key = ? AND source = 'lark-sync' AND status = 'success'
+             AND coverage_complete = 1 AND COALESCE(query, '') = ? AND chat_type = ?
+             AND range_end >= ? AND range_start <= ?
+           ORDER BY range_start ASC, range_end ASC`,
+        ).all(this.ownerKey, query, chatType, startAt, endAt)
+    const intervals = values.flatMap((value) => {
+      const item = row<{ range_start: number | null; range_end: number | null }>(value)
+      return item?.range_start === null || item?.range_start === undefined || item.range_end === null
+        ? []
+        : [{ start: item.range_start, end: item.range_end }]
+    })
+    let contiguous = startAt
+    for (const interval of intervals) {
+      if (interval.end < contiguous) continue
+      if (interval.start > contiguous) break
+      contiguous = Math.max(contiguous, interval.end + 1)
+      if (contiguous > endAt) break
+    }
+    let cursor = startAt
+    const missing: Array<{ start: number; end: number }> = []
+    for (const interval of intervals) {
+      if (interval.end < cursor) continue
+      if (interval.start > cursor) missing.push({ start: cursor, end: Math.min(endAt, interval.start - 1) })
+      cursor = Math.max(cursor, interval.end + 1)
+      if (cursor > endAt) break
+    }
+    if (cursor <= endAt) missing.push({ start: cursor, end: endAt })
+    return {
+      complete: missing.length === 0,
+      coveredThrough: contiguous <= startAt ? null : isoShanghai(Math.min(endAt, contiguous - 1)),
+      missingRanges: missing.map((range) => ({
+        start: new Date(range.start).toISOString(),
+        end: new Date(range.end).toISOString(),
+      })),
+    }
+  }
+
+  /** @internal Shared only with the semantic-memory subsystem in this package. */
+  semanticDatabase(): DatabaseSync {
+    this.assertOpen()
+    return this.db
+  }
+
+  /** @internal Opaque owner partition key; never expose it to model output. */
+  semanticOwnerKey(): string {
+    return this.ownerKey
   }
 
   close(): void {
@@ -561,6 +674,9 @@ export class OfficeMemory {
       )
       result.created += 1
     } else {
+      if (existing.source_digest !== message.digest || (existing.learning_eligible === 1 && eligibleValue === 0)) {
+        this.invalidateCurrentFactsForMessage(id, existing.revision, message.sentAt)
+      }
       this.db.prepare(
         `UPDATE memory_messages SET
            conversation_id = ?, sender_external_id = ?, sender_display_name = ?, message_type = ?,
@@ -670,7 +786,7 @@ export class OfficeMemory {
   }
 
   private emitChange(
-    entityType: "message" | "conversation",
+    entityType: "message" | "conversation" | "fact",
     entityId: string,
     occurredAt: number,
     emittedAt: number,
@@ -682,6 +798,52 @@ export class OfficeMemory {
        (op, entity_type, entity_id, owner_key, occurred_at, emitted_at, payload_ref, digest)
        VALUES ('upsert', ?, ?, ?, ?, ?, ?, ?)`,
     ).run(entityType, entityId, this.ownerKey, occurredAt, emittedAt, payloadRef, digest)
+  }
+
+  private invalidateCurrentFactsForMessage(messageId: string, revision: number, validTo: number): number {
+    const facts = this.db.prepare(
+      `SELECT DISTINCT f.id FROM memory_facts f
+       JOIN memory_fact_evidence fe ON fe.fact_id = f.id
+       WHERE f.owner_key = ? AND f.is_current = 1
+         AND fe.message_id = ? AND fe.message_revision = ?`,
+    ).all(this.ownerKey, messageId, revision)
+    let count = 0
+    for (const value of facts) {
+      const fact = row<{ id: string }>(value)
+      if (fact === null) continue
+      const changed = this.db.prepare(
+        `UPDATE memory_facts SET is_current = 0, valid_to = ?, updated_at = ?
+         WHERE id = ? AND owner_key = ? AND is_current = 1`,
+      ).run(validTo, Date.now(), fact.id, this.ownerKey)
+      if (numeric(changed.changes) === 0) continue
+      this.db.prepare("DELETE FROM memory_facts_fts WHERE fact_id = ? AND owner_key = ?").run(fact.id, this.ownerKey)
+      this.emitChange("fact", fact.id, validTo, Date.now(), null, sha256Text(`${fact.id}:source-invalidated`))
+      count += 1
+    }
+    return count
+  }
+
+  private invalidateCurrentFactsForConversation(conversationId: string, validTo: number): number {
+    const facts = this.db.prepare(
+      `SELECT DISTINCT f.id FROM memory_facts f
+       JOIN memory_fact_evidence fe ON fe.fact_id = f.id
+       JOIN memory_messages m ON m.id = fe.message_id
+       WHERE f.owner_key = ? AND f.is_current = 1 AND m.conversation_id = ?`,
+    ).all(this.ownerKey, conversationId)
+    let count = 0
+    for (const value of facts) {
+      const fact = row<{ id: string }>(value)
+      if (fact === null) continue
+      const changed = this.db.prepare(
+        `UPDATE memory_facts SET is_current = 0, valid_to = ?, updated_at = ?
+         WHERE id = ? AND owner_key = ? AND is_current = 1`,
+      ).run(validTo, Date.now(), fact.id, this.ownerKey)
+      if (numeric(changed.changes) === 0) continue
+      this.db.prepare("DELETE FROM memory_facts_fts WHERE fact_id = ? AND owner_key = ?").run(fact.id, this.ownerKey)
+      this.emitChange("fact", fact.id, validTo, Date.now(), null, sha256Text(`${fact.id}:scope-invalidated`))
+      count += 1
+    }
+    return count
   }
 
   private drainFts(): number {

@@ -15,7 +15,9 @@ import {
   type Models,
 } from "@earendil-works/pi-ai"
 import { redactInternalIdentifiers, truncateText } from "../infra/safety.js"
-import { OfficeMemory } from "../memory/index.js"
+import { logger } from "../infra/logger.js"
+import { OfficeMemory, PiFactExtractor, SemanticMemory } from "../memory/index.js"
+import { addRuntimeUsage, emptyRuntimeUsage } from "../memory/usage.js"
 import type {
   AgentRuntime,
   LarkGateway,
@@ -39,25 +41,14 @@ interface PiRuntimeOptions {
   streamFn: StreamFn
   skills: RuntimeSkills
   memory: OfficeMemory
+  semantic: SemanticMemory
 }
 
 function emptyUsage(): RuntimeUsage {
-  return {
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 0,
-    cacheWriteTokens: 0,
-    reasoningTokens: 0,
-    totalTokens: 0,
-    inputCostUsd: 0,
-    outputCostUsd: 0,
-    cacheReadCostUsd: 0,
-    cacheWriteCostUsd: 0,
-    estimatedCostUsd: 0,
-  }
+  return emptyRuntimeUsage()
 }
 
-function aggregateUsage(messages: readonly AgentMessage[]): RuntimeUsage {
+function aggregateUsage(messages: readonly AgentMessage[], auxiliary?: RuntimeUsage): RuntimeUsage {
   const result = emptyUsage()
   for (const message of messages) {
     if (message.role !== "assistant") continue
@@ -73,6 +64,7 @@ function aggregateUsage(messages: readonly AgentMessage[]): RuntimeUsage {
     result.cacheWriteCostUsd += message.usage.cost.cacheWrite
     result.estimatedCostUsd += message.usage.cost.total
   }
+  if (auxiliary) addRuntimeUsage(result, auxiliary)
   return result
 }
 
@@ -106,6 +98,7 @@ export class PiAgentRuntime implements AgentRuntime {
   private readonly streamFn: StreamFn
   private readonly skills: RuntimeSkills
   private readonly memory: OfficeMemory
+  private readonly semantic: SemanticMemory
 
   constructor(options: PiRuntimeOptions) {
     this.config = options.config
@@ -115,6 +108,7 @@ export class PiAgentRuntime implements AgentRuntime {
     this.streamFn = options.streamFn
     this.skills = options.skills
     this.memory = options.memory
+    this.semantic = options.semantic
   }
 
   async check(): Promise<{ provider: string; model: string; auth: string | null }> {
@@ -130,7 +124,15 @@ export class PiAgentRuntime implements AgentRuntime {
     const startedAt = Date.now()
     this.memory.markAssistantControlConversation(request.assistantControlChatId)
     const systemPrompt = await buildSystemPrompt(this.config, this.skills, request)
-    const tools = createRuntimeTools(this.config, this.gateway, this.skills, this.memory)
+    const auxiliaryUsage = emptyRuntimeUsage()
+    const tools = createRuntimeTools(
+      this.config,
+      this.gateway,
+      this.skills,
+      this.memory,
+      this.semantic,
+      (usage) => addRuntimeUsage(auxiliaryUsage, usage),
+    )
     const allowedTools = new Set(tools.map((tool) => tool.name))
     let turns = 0
     const invokedTools: string[] = []
@@ -157,7 +159,10 @@ export class PiAgentRuntime implements AgentRuntime {
     })
     agent.subscribe((event: AgentEvent) => {
       if (event.type === "turn_end") turns += 1
-      if (event.type === "tool_execution_start") invokedTools.push(event.toolName)
+      if (event.type === "tool_execution_start") {
+        invokedTools.push(event.toolName)
+        logger.info("agent_tool_started", { tool: event.toolName })
+      }
     })
 
     const timer = setTimeout(() => {
@@ -166,7 +171,7 @@ export class PiAgentRuntime implements AgentRuntime {
     }, this.config.runtimeTimeoutMs)
     timer.unref()
     const telemetry = (): RuntimeTelemetry => ({
-      usage: aggregateUsage(agent.state.messages),
+      usage: aggregateUsage(agent.state.messages, auxiliaryUsage),
       durationMs: Date.now() - startedAt,
       turns,
       tools: [...invokedTools],
@@ -213,6 +218,25 @@ export async function createLivePiRuntime(config: RuntimeConfig, gateway: LarkGa
   const skills = await loadRuntimeSkills(config.projectRoot, config.skillsDir)
   if (skills.skills.length === 0) throw new Error("no dedicated runtime skills were loaded")
   const modelRuntime = createModelRuntime(config)
+  const semantic = new SemanticMemory({
+    memory,
+    extractor: new PiFactExtractor({
+      models: modelRuntime.models,
+      model: modelRuntime.model,
+      ownerName: owner.ownerName,
+      thinkingLevel: config.memoryExtractionThinking,
+      timeoutMs: config.memoryExtractionTimeoutMs,
+      maxOutputTokens: config.memoryExtractionMaxOutputTokens,
+    }),
+    ownerName: owner.ownerName,
+    sessionizer: {
+      idleGapMs: config.memoryChunkIdleGapMs,
+      maxChunkTokens: config.memoryChunkMaxTokens,
+      maxPrimaryMessages: config.memoryChunkMaxMessages,
+      contextMessages: config.memoryContextMessages,
+    },
+    maxAttempts: config.memoryExtractionMaxAttempts,
+  })
   return new PiAgentRuntime({
     config,
     gateway,
@@ -221,6 +245,7 @@ export async function createLivePiRuntime(config: RuntimeConfig, gateway: LarkGa
     streamFn: modelRuntime.models.streamSimple.bind(modelRuntime.models),
     skills,
     memory,
+    semantic,
   })
 }
 
@@ -242,6 +267,25 @@ export async function createDemoPiRuntime(
   models.setProvider(faux.provider)
   const model = faux.getModel()
   if (!model) throw new Error("faux model is unavailable")
+  const semantic = new SemanticMemory({
+    memory,
+    extractor: new PiFactExtractor({
+      models,
+      model,
+      ownerName: owner.ownerName,
+      thinkingLevel: config.memoryExtractionThinking,
+      timeoutMs: config.memoryExtractionTimeoutMs,
+      maxOutputTokens: config.memoryExtractionMaxOutputTokens,
+    }),
+    ownerName: owner.ownerName,
+    sessionizer: {
+      idleGapMs: config.memoryChunkIdleGapMs,
+      maxChunkTokens: config.memoryChunkMaxTokens,
+      maxPrimaryMessages: config.memoryChunkMaxMessages,
+      contextMessages: config.memoryContextMessages,
+    },
+    maxAttempts: config.memoryExtractionMaxAttempts,
+  })
   const time = shanghaiTimeContext(now)
   faux.setResponses([
     fauxAssistantMessage([fauxToolCall("load_skill", { name: "lark-im" })], {
@@ -291,5 +335,6 @@ export async function createDemoPiRuntime(
     streamFn: models.streamSimple.bind(models),
     skills,
     memory,
+    semantic,
   })
 }

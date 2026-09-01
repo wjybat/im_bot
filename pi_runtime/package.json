@@ -11,6 +11,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
     "test:real": "node --import tsx --test test/real-agent.integration.ts",
+    "test:real:memory": "node --import tsx --test test/real-memory.integration.ts",
     "verify": "npm run typecheck && npm test && npm run build",
     "demo": "tsx src/main.ts demo",
     "smoke:lark": "tsx src/main.ts smoke-lark",

@@ -92,6 +92,15 @@ export interface MemoryStatus {
   messages: number
   eligibleMessages: number
   rejectedMessages: number
+  chunks: number
+  pendingChunks: number
+  facts: number
+  currentFacts: number
+  entities: number
+  edges: number
+  factExtractionTokens: number
+  factExtractionCostUsd: number
+  failedExtractions: number
   latestMessageAt: string | null
   fullSyncFrom: string | null
   fullSyncThrough: string | null
@@ -99,4 +108,13 @@ export interface MemoryStatus {
   changelogHead: number
   ftsAckedSeq: number
   ftsLag: number
+  semanticMessageHead: number
+  semanticAckedSeq: number
+  semanticLag: number
+}
+
+export interface MemoryCoverage {
+  complete: boolean
+  coveredThrough: string | null
+  missingRanges: Array<{ start: string; end: string }>
 }

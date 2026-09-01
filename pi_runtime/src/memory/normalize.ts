@@ -223,9 +223,29 @@ export function inspectLarkMessagePayload(
       isSelf,
       origin,
     }
+    const messageRevisionIdentity = {
+      externalId: normalized.externalId,
+      conversationExternalId: normalized.conversationExternalId,
+      senderExternalId: normalized.senderExternalId,
+      senderDisplayName: normalized.senderDisplayName,
+      messageType: normalized.messageType,
+      contentText: normalized.contentText,
+      contentJson: normalized.contentJson,
+      sentAt: normalized.sentAt,
+      updatedAt: normalized.updatedAt,
+      parentExternalId: normalized.parentExternalId,
+      rootExternalId: normalized.rootExternalId,
+      threadExternalId: normalized.threadExternalId,
+      mentions: normalized.mentions,
+      direction: normalized.direction,
+      isSelf: normalized.isSelf,
+      origin: normalized.origin,
+    }
     messages.push({
       ...normalized,
-      digest: stableHash(JSON.stringify(normalized)),
+      // Conversation title/type changes are indexed through the conversation
+      // changelog and must not create a new message revision or invalidate facts.
+      digest: stableHash(JSON.stringify(messageRevisionIdentity)),
     })
   }
   return { messages, messageIds: collectMessageIds(payload) }

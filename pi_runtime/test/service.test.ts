@@ -53,6 +53,10 @@ test("host redacts Feishu internal identifiers from final text", () => {
     redactInternalIdentifiers(`evidence mem_${"a".repeat(64)}`),
     "evidence [内部证据标识已隐藏]",
   )
+  assert.equal(
+    redactInternalIdentifiers(`fact fact_${"b".repeat(64)}`),
+    "fact [内部事实标识已隐藏]",
+  )
 })
 
 test("processing, final, and error replies use distinct stable idempotency keys", () => {

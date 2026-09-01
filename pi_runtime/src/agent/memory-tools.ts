@@ -2,75 +2,25 @@ import type { AgentTool } from "@earendil-works/pi-agent-core"
 import { Type } from "@earendil-works/pi-ai"
 import { logger } from "../infra/logger.js"
 import { truncateText } from "../infra/safety.js"
-import type { OfficeMemory } from "../memory/index.js"
-import type { MemoryIngestResult } from "../memory/types.js"
-import type { LarkGateway, RuntimeConfig } from "../types.js"
+import {
+  OFFICE_FACT_STATUSES,
+  OFFICE_FACT_TYPES,
+  type OfficeMemory,
+  type SemanticMemory,
+} from "../memory/index.js"
+import type { LarkGateway, RuntimeConfig, RuntimeUsage } from "../types.js"
+import { ContextPreparer } from "./context-preparer.js"
 
 function textResult(value: unknown, maxChars: number, details: Record<string, unknown> = {}) {
   const text = truncateText(JSON.stringify(value, null, 2), maxChars, "\n\n[memory output truncated]")
-  return {
-    content: [{ type: "text" as const, text }],
-    details,
-  }
-}
-
-function validateRange(start: string, end: string): void {
-  const startAt = Date.parse(start)
-  const endAt = Date.parse(end)
-  if (!Number.isFinite(startAt) || !Number.isFinite(endAt)) {
-    throw new Error("start and end must be ISO-8601 date-times")
-  }
-  if (startAt > endAt) throw new Error("start must not be after end")
-}
-
-function payloadMayHaveMore(value: unknown): boolean {
-  const visit = (current: unknown, depth: number): boolean => {
-    if (depth > 4 || typeof current !== "object" || current === null) return false
-    if (Array.isArray(current)) return current.some((item) => visit(item, depth + 1))
-    const row = current as Record<string, unknown>
-    if (row.truncated === true || row.has_more === true || row.hasMore === true) return true
-    for (const key of ["next_page_token", "nextPageToken", "page_token", "pageToken"]) {
-      if (typeof row[key] === "string" && row[key] !== "") return true
-    }
-    return ["data", "result"].some((key) => visit(row[key], depth + 1))
-  }
-  return visit(value, 0)
-}
-
-function aggregateIngest(target: MemoryIngestResult, value: MemoryIngestResult): number {
-  target.rawInserted = target.rawInserted || value.rawInserted
-  target.created += value.created
-  target.updated += value.updated
-  target.unchanged += value.unchanged
-  target.eligible += value.eligible
-  target.indexed += value.indexed
-  target.discoveredMessageIds.push(...value.discoveredMessageIds)
-  for (const [reason, count] of Object.entries(value.rejected)) {
-    if (count === undefined) continue
-    const key = reason as keyof MemoryIngestResult["rejected"]
-    target.rejected[key] = (target.rejected[key] ?? 0) + count
-  }
-  return value.rawInserted ? 1 : 0
-}
-
-function newAggregate(): MemoryIngestResult {
-  return {
-    rawInserted: false,
-    created: 0,
-    updated: 0,
-    unchanged: 0,
-    eligible: 0,
-    rejected: {},
-    indexed: 0,
-    discoveredMessageIds: [],
-  }
+  return { content: [{ type: "text" as const, text }], details }
 }
 
 export async function ingestMessageToolOutput(
   memory: OfficeMemory,
   args: readonly string[],
   stdout: string,
-): Promise<MemoryIngestResult | null> {
+) {
   const command = `${args[0] ?? ""} ${args[1] ?? ""}`
   const supported = new Set([
     "im +messages-search",
@@ -82,8 +32,7 @@ export async function ingestMessageToolOutput(
   const fallbackIndex = args.findIndex((arg) => arg === "--chat-id")
   const fallback = fallbackIndex >= 0 ? args[fallbackIndex + 1] : undefined
   try {
-    const payload = JSON.parse(stdout) as unknown
-    return memory.ingestLarkPayload(payload, {
+    return memory.ingestLarkPayload(JSON.parse(stdout) as unknown, {
       source: "lark-cli",
       resource: "chat.message",
       ...(fallback ? { fallbackConversationExternalId: fallback } : {}),
@@ -98,173 +47,162 @@ export function createMemoryTools(
   config: RuntimeConfig,
   gateway: LarkGateway,
   memory: OfficeMemory,
+  semantic: SemanticMemory,
+  onUsage?: (usage: RuntimeUsage) => void,
 ): AgentTool[] {
+  const preparer = new ContextPreparer({ config, gateway, memory, semantic, ...(onUsage ? { onUsage } : {}) })
+
   const searchParameters = Type.Object({
-    query: Type.Optional(Type.String({
-      maxLength: 2_000,
-      description: "Optional keyword or natural-language topic. Omit for a chronological time-range scan.",
-    })),
+    query: Type.Optional(Type.String({ maxLength: 2_000 })),
     start: Type.Optional(Type.String({ description: "Optional ISO-8601 inclusive lower time bound." })),
     end: Type.Optional(Type.String({ description: "Optional ISO-8601 inclusive upper time bound." })),
-    chatType: Type.Optional(Type.Union([Type.Literal("p2p"), Type.Literal("group")])),
+    chatType: Type.Optional(Type.Union([Type.Literal("p2p"), Type.Literal("group")], {
+      description: "Restrict only when the task explicitly needs one chat type; omit to cover both private and group chats.",
+    })),
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
   })
   const searchTool: AgentTool<typeof searchParameters> = {
     name: "search_office_memory",
-    label: "Search office memory",
+    label: "Search source office messages",
     description:
-      "Search the owner's locally indexed, evidence-backed Feishu office messages. This is a cache, not the source of truth: sync or use live Lark reads when freshness matters. Results never include the assistant-control conversation or agent-generated content.",
+      "Search locally indexed, evidence-backed Feishu messages. Use prepare_office_context first when the requested range must be current. Assistant-control and agent-generated content is excluded.",
     parameters: searchParameters,
     executionMode: "parallel",
     async execute(_toolCallId, params) {
       const hits = memory.search(params)
-      return textResult(
-        { count: hits.length, hits },
-        config.maxToolOutputChars,
-        { count: hits.length, source: "office-memory" },
-      )
+      return textResult({ count: hits.length, hits }, config.maxToolOutputChars, {
+        count: hits.length,
+        source: "office-memory",
+      })
+    },
+  }
+
+  const factTypeSchema = Type.Union(OFFICE_FACT_TYPES.map((value) => Type.Literal(value)))
+  const factStatusSchema = Type.Union(OFFICE_FACT_STATUSES.map((value) => Type.Literal(value)))
+  const hybridParameters = Type.Object({
+    query: Type.Optional(Type.String({ maxLength: 2_000 })),
+    start: Type.Optional(Type.String({ description: "Optional ISO-8601 fact/evidence lower bound." })),
+    end: Type.Optional(Type.String({ description: "Optional ISO-8601 fact/evidence upper bound." })),
+    dueStart: Type.Optional(Type.String({ description: "Optional ISO-8601 due-time lower bound." })),
+    dueEnd: Type.Optional(Type.String({ description: "Optional ISO-8601 due-time upper bound." })),
+    chatType: Type.Optional(Type.Union([Type.Literal("p2p"), Type.Literal("group")], {
+      description: "Restrict only when explicitly requested; omit to search private and group chats together.",
+    })),
+    factTypes: Type.Optional(Type.Array(factTypeSchema, { maxItems: OFFICE_FACT_TYPES.length })),
+    statuses: Type.Optional(Type.Array(factStatusSchema, { maxItems: OFFICE_FACT_STATUSES.length })),
+    currentOnly: Type.Optional(Type.Boolean({ description: "Defaults to true." })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
+    tokenBudget: Type.Optional(Type.Integer({ minimum: 500, maximum: 64_000 })),
+  })
+  const hybridTool: AgentTool<typeof hybridParameters> = {
+    name: "search_office_context",
+    label: "Search prepared office context",
+    description:
+      "Search prepared facts and source messages through lexical, structured, recency, and graph routes. Results are RRF-fused, deduplicated, evidence-linked, and token-budgeted.",
+    parameters: hybridParameters,
+    executionMode: "parallel",
+    async execute(_toolCallId, params) {
+      const result = semantic.search({
+        ...params,
+        tokenBudget: params.tokenBudget ?? config.memoryHybridTokenBudget,
+      })
+      return textResult(result, config.maxToolOutputChars, {
+        hits: result.hits.length,
+        estimatedTokens: result.estimatedTokens,
+        truncated: result.truncated,
+      })
     },
   }
 
   const evidenceParameters = Type.Object({
-    memoryRefs: Type.Array(Type.String({ pattern: "^mem_[a-f0-9]{64}$" }), {
+    memoryRefs: Type.Array(Type.String({ pattern: "^(?:mem|fact)_[a-f0-9]{64}$" }), {
       minItems: 1,
       maxItems: 20,
-      description: "Opaque memory references returned by search_office_memory.",
     }),
   })
   const evidenceTool: AgentTool<typeof evidenceParameters> = {
     name: "get_memory_evidence",
-    label: "Read office memory evidence",
-    description:
-      "Expand locally stored source evidence selected from search_office_memory. Only eligible human-office corpus rows can be returned.",
+    label: "Expand office evidence",
+    description: "Expand selected fact or message evidence. Only eligible source messages can be returned.",
     parameters: evidenceParameters,
     executionMode: "parallel",
     async execute(_toolCallId, params) {
-      const evidence = memory.getEvidence(params.memoryRefs)
+      const messages = memory.getEvidence(params.memoryRefs.filter((ref) => ref.startsWith("mem_")))
+      const facts = semantic.getFactEvidence(params.memoryRefs.filter((ref) => ref.startsWith("fact_")))
       return textResult(
-        { count: evidence.length, evidence },
+        { count: messages.length + facts.length, facts, messages },
         config.maxToolOutputChars,
-        { count: evidence.length, source: "office-memory" },
+        { count: messages.length + facts.length, source: "office-memory" },
       )
     },
   }
 
-  const syncParameters = Type.Object({
-    start: Type.String({ description: "ISO-8601 inclusive lower time bound chosen for this task." }),
-    end: Type.String({ description: "ISO-8601 inclusive upper time bound chosen for this task." }),
-    query: Type.Optional(Type.String({ maxLength: 2_000, description: "Optional Feishu message search query." })),
-    chatType: Type.Optional(Type.Union([Type.Literal("p2p"), Type.Literal("group")])),
+  const prepareParameters = Type.Object({
+    start: Type.String({ description: "ISO-8601 inclusive lower bound required by the task." }),
+    end: Type.String({ description: "ISO-8601 inclusive upper bound required by the task." }),
+    query: Type.Optional(Type.String({
+      maxLength: 2_000,
+      description: "Optional source-message filter. Omit for complete time-range coverage.",
+    })),
+    chatType: Type.Optional(Type.Union([Type.Literal("p2p"), Type.Literal("group")], {
+      description: "Restrict only when explicitly requested; omit to prepare private and group chats together.",
+    })),
+    freshness: Type.Optional(Type.Union([Type.Literal("current"), Type.Literal("cached_ok")])),
+    semantic: Type.Optional(Type.Union([Type.Literal("messages"), Type.Literal("facts")], {
+      description: "facts includes both durable facts/graph and their source messages; do not prepare messages separately.",
+    })),
   })
-  const syncTool: AgentTool<typeof syncParameters> = {
-    name: "sync_office_context",
-    label: "Sync Feishu office context",
+  const prepareTool: AgentTool<typeof prepareParameters> = {
+    name: "prepare_office_context",
+    label: "Prepare current office context",
     description:
-      "Incrementally fetch a bounded owner-authorized Feishu message range into local office memory, hydrate message bodies when needed, and update FTS. Use before memory search when current information is required. The assistant-control chat is retained only as rejected audit data and never becomes office corpus.",
-    parameters: syncParameters,
+      "Prepare one bounded Feishu message range for reliable reasoning. For broad tasks, use one continuous range, omit chatType to cover private and group chats together, and use semantic=facts because it already includes source messages. Internally handles coverage, pagination, hydration, idempotent ingestion, and at most one fact/graph update per Agent run. ready and partial are both usable; after one broad preparation continue to search instead of preparing alternate variants.",
+    parameters: prepareParameters,
     executionMode: "sequential",
     async execute(_toolCallId, params, signal) {
-      validateRange(params.start, params.end)
-      const startedAt = Date.now()
-      const aggregate = newAggregate()
-      let rawRecordsInserted = 0
-      try {
-        const payload = await gateway.searchMessages(
-          {
-            query: params.query ?? "",
-            start: params.start,
-            end: params.end,
-            ...(params.chatType ? { chatType: params.chatType } : {}),
-            pageLimit: config.maxMessagePages,
-          },
-          signal,
-        )
-        const mayHaveMore = payloadMayHaveMore(payload)
-        rawRecordsInserted += aggregateIngest(
-          aggregate,
-          memory.ingestLarkPayload(payload, { source: "lark-sync", resource: "chat.message" }),
-        )
-
-        const inspected = memory.inspectLarkPayload(payload)
-        const withBodies = new Set(
-          inspected.messages.filter((message) => message.contentText.trim() !== "").map((message) => message.externalId),
-        )
-        const unresolved = inspected.messageIds.filter((id) => !withBodies.has(id))
-        for (let offset = 0; offset < unresolved.length; offset += 50) {
-          const hydrated = await gateway.getMessagesByIds(unresolved.slice(offset, offset + 50), signal)
-          rawRecordsInserted += aggregateIngest(
-            aggregate,
-            memory.ingestLarkPayload(hydrated, { source: "lark-sync", resource: "chat.message" }),
-          )
-        }
-
-        memory.recordSyncRun({
-          source: "lark-sync",
-          start: params.start,
-          end: params.end,
-          query: params.query ?? "",
-          ...(params.chatType ? { chatType: params.chatType } : {}),
-          coverageComplete: (params.query ?? "").trim() === "" && params.chatType === undefined && !mayHaveMore,
-          status: "success",
-          startedAt,
-          rawRecords: rawRecordsInserted,
-          messagesCreated: aggregate.created,
-          messagesUpdated: aggregate.updated,
-        })
-        const status = memory.status()
-        return textResult(
-          {
-            synced: true,
-            range: { start: params.start, end: params.end },
-            rangeComplete: !mayHaveMore,
-            created: aggregate.created,
-            updated: aggregate.updated,
-            unchanged: aggregate.unchanged,
-            eligible: aggregate.eligible,
-            rejected: aggregate.rejected,
-            memory: {
-              eligibleMessages: status.eligibleMessages,
-              latestMessageAt: status.latestMessageAt,
-              fullSyncFrom: status.fullSyncFrom,
-              fullSyncThrough: status.fullSyncThrough,
-              ftsLag: status.ftsLag,
-            },
-          },
-          config.maxToolOutputChars,
-          { created: aggregate.created, updated: aggregate.updated, rejected: aggregate.rejected },
-        )
-      } catch (error) {
-        memory.recordSyncRun({
-          source: "lark-sync",
-          start: params.start,
-          end: params.end,
-          query: params.query ?? "",
-          ...(params.chatType ? { chatType: params.chatType } : {}),
-          coverageComplete: false,
-          status: "failed",
-          startedAt,
-          rawRecords: rawRecordsInserted,
-          messagesCreated: aggregate.created,
-          messagesUpdated: aggregate.updated,
-          error: error instanceof Error ? error.message : String(error),
-        })
-        throw error
-      }
+      const result = await preparer.prepare(params, signal)
+      return textResult(result, config.maxToolOutputChars, {
+        status: result.status,
+        coverage: result.coverage.status,
+        semantic: result.semantic.status,
+      })
     },
   }
 
   const statusParameters = Type.Object({})
   const statusTool: AgentTool<typeof statusParameters> = {
     name: "get_memory_status",
-    label: "Inspect office memory freshness",
-    description:
-      "Inspect local office-memory coverage and FTS lag without exposing source identifiers. Use it to decide whether a live sync is needed.",
+    label: "Inspect office-memory readiness",
+    description: "Inspect business-level message coverage and semantic readiness without internal cursors.",
     parameters: statusParameters,
     executionMode: "parallel",
     async execute() {
-      return textResult(memory.status(), config.maxToolOutputChars, { source: "office-memory" })
+      const status = memory.status()
+      const pendingMessages = semantic.pendingMessageCount()
+      return textResult(
+        {
+          messageMemory: {
+            status: status.eligibleMessages > 0 ? "available" : "empty",
+            eligibleMessages: status.eligibleMessages,
+            rejectedMessages: status.rejectedMessages,
+            latestMessageAt: status.latestMessageAt,
+            lastCompleteWindow:
+              status.fullSyncFrom && status.fullSyncThrough
+                ? { start: status.fullSyncFrom, end: status.fullSyncThrough }
+                : null,
+            lastSuccessfulSyncAt: status.lastSuccessfulSyncAt,
+          },
+          semanticMemory: {
+            status: pendingMessages === 0 ? "ready" : status.currentFacts > 0 ? "partial" : "stale",
+            currentFacts: status.currentFacts,
+            failedExtractions: status.failedExtractions,
+          },
+        },
+        config.maxToolOutputChars,
+        { source: "office-memory" },
+      )
     },
   }
 
-  return [searchTool, evidenceTool, syncTool, statusTool]
+  return [searchTool, hybridTool, evidenceTool, prepareTool, statusTool]
 }

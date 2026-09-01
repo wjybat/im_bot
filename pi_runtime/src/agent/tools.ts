@@ -2,8 +2,8 @@ import type { AgentTool } from "@earendil-works/pi-agent-core"
 import { Type } from "@earendil-works/pi-ai"
 import { truncateText } from "../infra/safety.js"
 import { logger } from "../infra/logger.js"
-import type { OfficeMemory } from "../memory/index.js"
-import type { LarkGateway, RuntimeConfig } from "../types.js"
+import type { OfficeMemory, SemanticMemory } from "../memory/index.js"
+import type { LarkGateway, RuntimeConfig, RuntimeUsage } from "../types.js"
 import { createMemoryTools, ingestMessageToolOutput } from "./memory-tools.js"
 import type { RuntimeSkills } from "./skills.js"
 
@@ -12,7 +12,16 @@ export function createRuntimeTools(
   gateway: LarkGateway,
   skills: RuntimeSkills,
   memory: OfficeMemory,
+  semantic: SemanticMemory,
+  onUsage?: (usage: RuntimeUsage) => void,
 ): AgentTool[] {
+  const larkReadCache = new Map<
+    string,
+    Promise<{
+      output: { stdout: string }
+      memoryIngest: Awaited<ReturnType<typeof ingestMessageToolOutput>>
+    }>
+  >()
   const parameters = Type.Object({
     args: Type.Array(Type.String(), {
       minItems: 1,
@@ -29,11 +38,21 @@ export function createRuntimeTools(
     parameters,
     executionMode: "parallel",
     async execute(_toolCallId, params, signal) {
-      const output = await gateway.runReadOnlyCli(params.args, signal)
-      const memoryIngest = await ingestMessageToolOutput(memory, params.args, output.stdout).catch((error) => {
-        logger.error("office_memory_ingest_failed", error)
-        return null
-      })
+      const cacheKey = JSON.stringify(params.args)
+      const cached = larkReadCache.has(cacheKey)
+      let operation = larkReadCache.get(cacheKey)
+      if (!operation) {
+        operation = gateway.runReadOnlyCli(params.args, signal).then(async (output) => {
+          const memoryIngest = await ingestMessageToolOutput(memory, params.args, output.stdout).catch((error) => {
+            logger.error("office_memory_ingest_failed", error)
+            return null
+          })
+          return { output, memoryIngest }
+        })
+        larkReadCache.set(cacheKey, operation)
+        operation.catch(() => larkReadCache.delete(cacheKey))
+      }
+      const { output, memoryIngest } = await operation
       return {
         content: [
           {
@@ -44,6 +63,7 @@ export function createRuntimeTools(
         details: {
           command: params.args.slice(0, params.args[1]?.startsWith("+") ? 2 : 3),
           outputBytes: Buffer.byteLength(output.stdout),
+          cached,
           ...(memoryIngest
             ? {
                 memoryCreated: memoryIngest.created,
@@ -55,5 +75,10 @@ export function createRuntimeTools(
       }
     },
   }
-  return [skills.loadTool, skills.readFileTool, ...createMemoryTools(config, gateway, memory), runLarkCli]
+  return [
+    skills.loadTool,
+    skills.readFileTool,
+    ...createMemoryTools(config, gateway, memory, semantic, onUsage),
+    runLarkCli,
+  ]
 }

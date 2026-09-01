@@ -22,6 +22,7 @@ export function redactInternalIdentifiers(text: string): string {
       "[内部标识已隐藏]",
     )
     .replace(/\bmem_[a-f0-9]{64}\b/gu, "[内部证据标识已隐藏]")
+    .replace(/\bfact_[a-f0-9]{64}\b/gu, "[内部事实标识已隐藏]")
 }
 
 export function safeError(error: unknown): { type: string; message: string } {

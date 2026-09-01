@@ -6,6 +6,7 @@ import { createRuntimeTools } from "../src/agent/tools.js"
 import { loadConfig } from "../src/config.js"
 import { MockLarkGateway } from "../src/demo/mock-lark.js"
 import { OfficeMemory } from "../src/memory/index.js"
+import { createTestSemantic } from "./fakes.js"
 
 test("offline Pi demo loads a dedicated skill, calls a read-only Lark tool, and returns evidence", async () => {
   const config = loadConfig()
@@ -36,16 +37,25 @@ test("skill discovery is confined to the Pi runtime catalog", async () => {
   assert.ok(loaded.skills.some((skill) => skill.name === "daily-work-brief"))
   assert.equal(loaded.diagnostics.length, 0)
   const memory = new OfficeMemory({ path: ":memory:", ownerExternalId: "redacted-demo-owner" })
-  const tools = createRuntimeTools(config, new MockLarkGateway(), loaded, memory)
+  const semantic = createTestSemantic(memory, config)
+  const gateway = new MockLarkGateway()
+  const tools = createRuntimeTools(config, gateway, loaded, memory, semantic)
   assert.deepEqual(tools.map((tool) => tool.name).sort(), [
     "get_memory_evidence",
     "get_memory_status",
     "load_skill",
+    "prepare_office_context",
     "read_skill_file",
     "run_lark_cli",
+    "search_office_context",
     "search_office_memory",
-    "sync_office_context",
   ])
   assert.equal(tools.some((tool) => /bash|shell|send|reply|auth|write/u.test(tool.name)), false)
+  const runLark = tools.find((tool) => tool.name === "run_lark_cli")
+  assert.ok(runLark)
+  const args = ["im", "+messages-search", "--query", "分页", "--as", "user", "--format", "json"]
+  await runLark.execute("cached-read-1", { args }, new AbortController().signal)
+  await runLark.execute("cached-read-2", { args }, new AbortController().signal)
+  assert.equal(gateway.calls.filter((call) => call.method === "runReadOnlyCli").length, 1)
   memory.close()
 })

@@ -17,7 +17,10 @@
 - Pi Token、缓存 Token、工具轨迹和基于官方价格的参考成本统计。
 - 每条飞书消息一条聚合 Token/成本台账，记录成功、Runtime 失败和最终回复失败产生的实际用量。
 - 单进程 SQLite 办公记忆：原始响应、规范化会话/消息、revision、Outbox、独立 FTS 游标和全文检索。
-- `get_memory_status`、`sync_office_context`、`search_office_memory`、`get_memory_evidence` 四个通用记忆工具；历史问题优先检索记忆，时效性问题按需增量回源飞书。
+- 五个通用记忆工具：业务状态、上下文准备、原文搜索、混合上下文检索和证据展开。分页、自动拆窗、幂等同步与单次事实更新由上下文准备器内部完成，不暴露给 Agent。
+- 会话切片采用 primary + context 证据结构；LLM 抽取 ACTION_ITEM、REQUEST、DELEGATION、COMMITMENT、DECISION、STATUS、DEADLINE、RISK，并强制绑定 primary 原文。
+- SQLite 轻量图保存 Person/Project/System/Organization/Document/Event 实体，以及 ABOUT、ASSIGNED_TO、EVIDENCE_FROM、AUTHORED_BY、PART_OF、SUPERSEDES 等有类型边。
+- 混合检索并行使用消息 FTS、事实 FTS、结构化状态/期限、消息时序和一跳实体图，再以 RRF 融合、去重并按 Token 预算打包。
 - 防污染硬闸：用户与办公助手的控制私聊、Agent 自产内容、空内容和禁用会话不会进入办公 FTS，规则不依赖模型提示词。
 
 ## 验证
@@ -29,6 +32,7 @@ npm run verify
 npm run demo
 npm run smoke:lark
 npm run test:real
+npm run test:real:memory
 ```
 
 `npm test` 中的 Faux Provider 只承担确定性的工具协议单元测试，不作为运行效果验收。
@@ -36,6 +40,8 @@ npm run test:real
 `smoke:lark` 仍使用本地 Faux 模型，但会通过真实 `lark-cli --as user` 执行当天消息只读检索；它只输出工具轨迹，不展示消息内容，也不发送飞书回复。
 
 `test:real` 使用真实 `gpt-5.6-luna` 和真实飞书只读消息，检查模型自主加载 Skill、选择消息工具、执行多轮推理并生成不泄露内部 ID 的办公助理回答。
+
+`test:real:memory` 使用内存数据库跑通真实“每日简报 → 高层上下文准备 → 混合检索 → 证据核验”链路，不发送飞书回复，也不改正式记忆库。
 
 同步本机最新版官方 Skills：
 
@@ -119,7 +125,7 @@ src/adapters/lark-cli.ts  飞书 CLI、User/Bot 身份与事件连接
 src/service.ts            Owner 闸、队列、去重、刷新、回复
 src/agent/pi-runtime.ts   Pi Agent 生命周期、turn/timeout/usage
 src/agent/tools.ts        Skill、记忆和 Lark CLI 通用受控工具
-src/memory/               SQLite 证据库、规范化、准入守卫、Outbox 与 FTS
+src/memory/               SQLite 证据/事实/图、切片抽取、Outbox、FTS、RRF 与上下文打包
 runtime/system.md         Runtime 身份、安全和自主规划提示词
 runtime/skills/integrations/lark/  版本化的飞书集成 Skills
 runtime/skills/workflows/          稳定可复用的业务工作流 Skills
@@ -133,15 +139,36 @@ Pi 没有获得通用 Bash、文件编辑或飞书写工具。`run_lark_cli` 会
 
 ## 办公上下文记忆
 
-第一阶段记忆数据库默认位于：
+记忆数据库默认位于：
 
 ```text
 var/office-memory.db
 ```
 
-数据库文件权限为 `0600`，目录已被 Git 忽略。每次 `sync_office_context` 或受支持的 IM 只读命令返回消息后，宿主会在同一事务中保存原始响应、规范化消息和 Outbox 变更，再由独立游标增量更新 FTS。相同消息重复拉取不会重复入库；编辑后的内容会递增 revision 并替换搜索索引。
+数据库文件权限为 `0600`，目录已被 Git 忽略。上下文准备器或受支持的 IM 只读命令返回消息后，宿主会在同一事务中保存原始响应、规范化消息和 Outbox 变更，再由独立游标增量更新 FTS。相同消息重复拉取不会重复入库；编辑后的内容会递增 revision 并替换搜索索引。
 
-本地记忆是飞书数据的可检索镜像，不是最终事实源。Agent 会根据问题时效决定是否先同步飞书；记忆缺失、过期或需要完整话题上下文时仍可直接调用 Lark 只读工具。当前只实现证据层和全文检索，尚未进行 LLM 事实抽取、Entity/Fact 图结构和长期事实合并。
+`prepare_office_context` 是 Agent 唯一需要了解的准备入口。它会检查已有覆盖，只拉取缺口；分页截断时在内部自动拆分时间窗；全部窗口结束后最多执行一次有界事实更新；同一 Agent run 内的相同请求直接复用结果。返回值只表达 `ready/partial`、消息覆盖和语义可用性，不暴露游标、序列水位、拆窗建议或抽取开关。
+
+本地记忆是飞书数据的可检索镜像，不是最终事实源。Agent 会根据问题时效决定是否先同步飞书；记忆缺失、过期或需要完整话题上下文时仍可直接调用 Lark 只读工具。
+
+### 事实与轻量图
+
+内部语义处理器只处理尚未由成功 chunk 覆盖的消息 revision。相邻消息按会话、90 分钟空闲边界、1400 Token 和 20 条 primary 消息切片，并为每个片段补最多 5 条前文作为 context。模型输出的每条事实必须引用至少一个 primary 证据；只引用 context、引用不存在序号或没有证据的事实会在写库前被拒绝。
+
+同一 `fact_type + topic_key` 的后续状态不会覆盖删除历史：新事实将旧事实标记为非 current，并写入 `SUPERSEDES` 边。消息编辑会产生新 revision，旧 revision 独占的事实会失效；相同结论由新消息重复确认时则合并证据和置信度。
+
+抽取默认复用当前真实模型，思考强度为 `low`，单个 chunk 独立限制为 2 分钟和 4096 输出 Token，每次上下文准备最多处理 3 个 chunk。某个 chunk 超时只会留下可重试的 failed run，不阻止 Agent 使用已经同步的原文继续回答。每次抽取的模型、Prompt 版本、成功/失败、Token、成本和结构化输出均写入 extraction run；这部分 usage 也会合并进触发它的那条飞书消息成本台账。
+
+### 混合检索
+
+`search_office_context` 同时召回：
+
+- 事实 FTS 与原消息 FTS；
+- current 状态、owner 直接相关事项和明确期限；
+- 指定时间范围的最近消息；
+- 查询命中的实体及其一跳关联事实。
+
+各路分数不可直接比较，因此只使用排名做 Reciprocal Rank Fusion（默认 `k=60`）。融合后去掉重复事实，以及已经作为事实 evidence 出现的重复消息，再按 `IM_BOT_PI_MEMORY_CONTEXT_TOKENS` 预算装配完整证据项。`fact_...` / `mem_...` 只作为内部回查句柄，最终回答的宿主脱敏层会强制移除。
 
 防污染策略在数据库写入层执行：
 
@@ -153,7 +180,7 @@ var/office-memory.db
 
 ## Token 与成本台账
 
-Pi 从 OpenAI Responses usage 中读取普通输入、缓存读取、缓存写入、输出和 reasoning Token。项目不会保存逐 turn 台账，只在每条飞书消息完成后把所有 turns 汇总为一条记录：
+Pi 从 OpenAI Responses usage 中读取普通输入、缓存读取、缓存写入、输出和 reasoning Token。Agent 主循环与事实抽取工具内部的 LLM usage 会一起聚合。项目不会保存逐 turn 台账，只在每条飞书消息完成后把所有调用汇总为一条记录：
 
 ```text
 var/usage-ledger.jsonl
@@ -166,7 +193,7 @@ GPT-5.6 Luna 的参考价格从 `.env` 读取。默认采用 OpenAI 官方公开
 ## 当前生产化缺口
 
 - Mac 睡眠时本地长连接仍会暂停；尚未实现唤醒后的消息补拉 checkpoint。
-- 当前已接入消息证据级 SQLite 记忆，但尚未实现后台周期同步、日历/任务规范化、事实抽取、图关系、语义向量和长期事实压缩。
+- 当前已接入消息证据、事实和轻量图记忆，但尚未实现后台周期同步、日历/任务/邮件/文档规范化、向量检索、图社区聚类和跨月事实压缩。
 - JSON 凭据存储只做进程内串行和原子替换，生产多进程部署需要跨进程文件锁或密钥服务。
 - 日历读取权限当前可能缺失；Agent 会把它当可选来源并继续使用消息/任务。
 - 已有处理中回执；尚未加入流式增量回答、失败分类卡片、重试队列和死信队列。

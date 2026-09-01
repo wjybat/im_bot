@@ -63,10 +63,10 @@ function provider(): RuntimeConfig["provider"] {
   return value as RuntimeConfig["provider"]
 }
 
-function thinkingLevel(): ThinkingLevel {
-  const value = process.env.IM_BOT_PI_THINKING || "high"
+function thinkingLevel(name = "IM_BOT_PI_THINKING", fallback = "high"): ThinkingLevel {
+  const value = process.env[name] || fallback
   if (!new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]).has(value)) {
-    throw new Error("IM_BOT_PI_THINKING is invalid")
+    throw new Error(`${name} is invalid`)
   }
   return value as ThinkingLevel
 }
@@ -82,6 +82,19 @@ export function loadConfig(): RuntimeConfig {
     stateFile: resolve(projectRoot, "var", "processed-messages.json"),
     usageLedgerFile: resolve(projectRoot, "var", "usage-ledger.jsonl"),
     memoryFile: resolve(projectRoot, process.env.IM_BOT_PI_MEMORY_FILE || "var/office-memory.db"),
+    memoryExtractionThinking: thinkingLevel("IM_BOT_PI_MEMORY_THINKING", "low"),
+    memoryExtractionTimeoutMs: integer("IM_BOT_PI_MEMORY_EXTRACTION_TIMEOUT_MS", 120_000, 10_000, 300_000),
+    memoryExtractionMaxOutputTokens: integer("IM_BOT_PI_MEMORY_EXTRACTION_MAX_OUTPUT_TOKENS", 4096, 256, 16_384),
+    memoryChunkIdleGapMs: integer("IM_BOT_PI_MEMORY_IDLE_GAP_MINUTES", 90, 5, 1440) * 60_000,
+    memoryChunkMaxTokens: integer("IM_BOT_PI_MEMORY_CHUNK_TOKENS", 1400, 200, 8000),
+    memoryChunkMaxMessages: integer("IM_BOT_PI_MEMORY_CHUNK_MESSAGES", 20, 1, 100),
+    memoryContextMessages: integer("IM_BOT_PI_MEMORY_CONTEXT_MESSAGES", 5, 0, 30),
+    memoryExtractionMaxChunks: integer("IM_BOT_PI_MEMORY_MAX_CHUNKS", 3, 1, 30),
+    memoryExtractionMaxAttempts: integer("IM_BOT_PI_MEMORY_MAX_ATTEMPTS", 3, 1, 10),
+    memoryHybridTokenBudget: integer("IM_BOT_PI_MEMORY_CONTEXT_TOKENS", 12000, 500, 64000),
+    memoryPrepareMaxWindows: integer("IM_BOT_PI_MEMORY_PREPARE_MAX_WINDOWS", 16, 1, 64),
+    memoryPrepareMinWindowMs:
+      integer("IM_BOT_PI_MEMORY_PREPARE_MIN_WINDOW_SECONDS", 60, 1, 3600) * 1000,
     authFile: resolve(projectRoot, process.env.IM_BOT_PI_AUTH_FILE || "var/pi-auth/auth.json"),
     larkCli:
       process.env.IM_BOT_LARK_CLI ||
