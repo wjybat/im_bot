@@ -95,6 +95,10 @@ export function loadConfig(): RuntimeConfig {
     memoryPrepareMaxWindows: integer("IM_BOT_PI_MEMORY_PREPARE_MAX_WINDOWS", 16, 1, 64),
     memoryPrepareMinWindowMs:
       integer("IM_BOT_PI_MEMORY_PREPARE_MIN_WINDOW_SECONDS", 60, 1, 3600) * 1000,
+    historyTurns: integer("IM_BOT_PI_HISTORY_TURNS", 8, 0, 40),
+    historyTurnMaxChars: integer("IM_BOT_PI_HISTORY_TURN_CHARS", 4000, 100, 12_000),
+    conversationIdleResetMs:
+      integer("IM_BOT_PI_CONVERSATION_IDLE_RESET_MINUTES", 60, 1, 10_080) * 60_000,
     authFile: resolve(projectRoot, process.env.IM_BOT_PI_AUTH_FILE || "var/pi-auth/auth.json"),
     larkCli:
       process.env.IM_BOT_LARK_CLI ||

@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises"
-import type { RuntimeConfig, RuntimeRequest } from "../types.js"
+import { truncateText } from "../infra/safety.js"
+import type { ConversationTurn, RuntimeConfig, RuntimeRequest } from "../types.js"
 import type { RuntimeSkills } from "./skills.js"
 import { shanghaiTimeContext } from "./time.js"
 
@@ -15,5 +16,15 @@ export async function buildSystemPrompt(
     runtime: "pi-agent-core",
     toolPolicy: "dedicated-read-only",
   }
-  return `${base.trim()}\n\n${skills.catalogPrompt}\n\n<RUNTIME_CONTEXT_JSON>\n${JSON.stringify(context)}\n</RUNTIME_CONTEXT_JSON>`
+  const recent = (request.recentConversation ?? [])
+    .slice(-config.historyTurns * 2)
+    .map((turn) => ({
+      role: turn.role,
+      at: turn.at,
+      text: truncateText(turn.text, config.historyTurnMaxChars),
+    }))
+  const historyBlock = recent.length
+    ? `\n\n<RECENT_CONVERSATION_JSON>\n${JSON.stringify(recent)}\n</RECENT_CONVERSATION_JSON>`
+    : ""
+  return `${base.trim()}\n\n${skills.catalogPrompt}\n\n<RUNTIME_CONTEXT_JSON>\n${JSON.stringify(context)}\n</RUNTIME_CONTEXT_JSON>${historyBlock}`
 }

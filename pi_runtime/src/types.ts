@@ -19,6 +19,9 @@ export interface RuntimeConfig {
   memoryHybridTokenBudget: number
   memoryPrepareMaxWindows: number
   memoryPrepareMinWindowMs: number
+  historyTurns: number
+  historyTurnMaxChars: number
+  conversationIdleResetMs: number
   authFile: string
   larkCli: string
   provider: "dmall-ai" | "openai" | "anthropic" | "openai-codex"
@@ -63,6 +66,13 @@ export interface RuntimeRequest {
   sessionId: string
   now?: Date
   assistantControlChatId?: string | null
+  recentConversation?: readonly ConversationTurn[]
+}
+
+export interface ConversationTurn {
+  role: "user" | "assistant"
+  text: string
+  at: string
 }
 
 export interface RuntimeUsage {

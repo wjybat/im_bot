@@ -6,6 +6,7 @@ import { PiRuntimeExecutionError } from "./agent/pi-runtime.js"
 import type {
   AcceptedMessage,
   AgentRuntime,
+  ConversationTurn,
   IncomingMessageEvent,
   LarkGateway,
   MessageConsumer,
@@ -69,6 +70,7 @@ export class PiBotService {
   private restartAttempt = 0
   private authTimer: NodeJS.Timeout | null = null
   private authVerification: Promise<OwnerIdentity> | null = null
+  private readonly conversationHistory: ConversationTurn[] = []
 
   constructor(
     private readonly config: RuntimeConfig,
@@ -172,6 +174,25 @@ export class PiBotService {
     }
   }
 
+  private recordConversationTurn(turn: ConversationTurn): void {
+    const maxTurns = this.config.historyTurns * 2
+    if (maxTurns === 0) return
+    const previous = this.conversationHistory[this.conversationHistory.length - 1]
+    if (previous !== undefined) {
+      const previousAt = Date.parse(previous.at)
+      if (Number.isFinite(previousAt) && Date.parse(turn.at) - previousAt > this.config.conversationIdleResetMs) {
+        this.conversationHistory.length = 0
+      }
+    }
+    this.conversationHistory.push(turn)
+    while (this.conversationHistory.length > maxTurns) this.conversationHistory.shift()
+  }
+
+  private recentConversation(): ConversationTurn[] {
+    const maxTurns = this.config.historyTurns * 2
+    return this.conversationHistory.slice(-maxTurns)
+  }
+
   private async processMessage(message: AcceptedMessage): Promise<void> {
     const hash = hashIdentifier(message.messageId)
     const startedAt = Date.now()
@@ -189,16 +210,21 @@ export class PiBotService {
     }
     try {
       await this.verifyUserAuth()
+      const recentConversation = this.recentConversation()
       const result = await this.runtime.run({
         text: message.content,
         requestId: hash,
         sessionId: `feishu-owner-${hashIdentifier(this.owner?.ownerOpenId ?? "owner")}`,
         assistantControlChatId: message.chatId,
+        ...(recentConversation.length > 0 ? { recentConversation } : {}),
       })
       telemetry = result
       runtimeCompleted = true
       await this.gateway.replyToMessage(message.messageId, result.reply, "final")
       finalReplyDelivered = true
+      const nowIso = new Date().toISOString()
+      this.recordConversationTurn({ role: "user", text: message.content, at: message.receivedAt })
+      this.recordConversationTurn({ role: "assistant", text: result.reply, at: nowIso })
       await this.store.mark(message.messageId)
       status = "success"
       logger.info("message_processed", {
