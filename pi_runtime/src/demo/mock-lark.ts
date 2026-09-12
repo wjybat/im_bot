@@ -1,4 +1,5 @@
 import type {
+  CardActionConsumerCallbacks,
   LarkGateway,
   MessageConsumer,
   MessageConsumerCallbacks,
@@ -109,6 +110,14 @@ export class MockLarkGateway implements LarkGateway {
   }
 
   startMessageConsumer(_callbacks: MessageConsumerCallbacks): MessageConsumer {
+    throw new Error("mock demo does not start an event consumer")
+  }
+
+  async sendCardMessage(_input: { userOpenId: string; card: unknown }): Promise<{ messageId: string }> {
+    throw new Error("mock demo never performs external writes")
+  }
+
+  startCardActionConsumer(_callbacks: CardActionConsumerCallbacks): MessageConsumer {
     throw new Error("mock demo does not start an event consumer")
   }
 }

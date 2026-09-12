@@ -50,7 +50,14 @@ export function createMemoryTools(
   semantic: SemanticMemory,
   onUsage?: (usage: RuntimeUsage) => void,
 ): AgentTool[] {
-  const preparer = new ContextPreparer({ config, gateway, memory, semantic, ...(onUsage ? { onUsage } : {}) })
+  const preparer = new ContextPreparer({
+    config,
+    gateway,
+    memory,
+    semantic,
+    prioritizeRequestWindow: true,
+    ...(onUsage ? { onUsage } : {}),
+  })
 
   const searchParameters = Type.Object({
     query: Type.Optional(Type.String({ maxLength: 2_000 })),

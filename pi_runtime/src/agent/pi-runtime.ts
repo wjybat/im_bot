@@ -21,6 +21,7 @@ import { addRuntimeUsage, emptyRuntimeUsage } from "../memory/usage.js"
 import type {
   AgentRuntime,
   LarkGateway,
+  MemoryBackedRuntime,
   RuntimeConfig,
   RuntimeRequest,
   RuntimeResult,
@@ -90,15 +91,16 @@ function finalReply(messages: readonly AgentMessage[]): string {
   return text
 }
 
-export class PiAgentRuntime implements AgentRuntime {
+export class PiAgentRuntime implements MemoryBackedRuntime {
+  readonly memory: OfficeMemory
+  readonly semantic: SemanticMemory
+
   private readonly config: RuntimeConfig
   private readonly gateway: LarkGateway
   private readonly models: Models
   private readonly model: Model<Api>
   private readonly streamFn: StreamFn
   private readonly skills: RuntimeSkills
-  private readonly memory: OfficeMemory
-  private readonly semantic: SemanticMemory
 
   constructor(options: PiRuntimeOptions) {
     this.config = options.config

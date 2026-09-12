@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { ContextPreparer } from "../src/agent/context-preparer.js"
+import { ContextPreparer, splitWindow } from "../src/agent/context-preparer.js"
 import { loadConfig } from "../src/config.js"
 import { MockLarkGateway } from "../src/demo/mock-lark.js"
 import { OfficeMemory } from "../src/memory/index.js"
@@ -33,6 +33,19 @@ class TruncatingGateway extends MockLarkGateway {
     }
   }
 }
+
+test("split windows serialize to second precision for Feishu field validation", () => {
+  const [left, right] = splitWindow(
+    { start: "2026-08-28T10:14:14.000Z", end: "2026-09-11T10:14:14.000Z" },
+    60_000,
+  )!
+  assert.ok(left)
+  assert.ok(right)
+  for (const bound of [left.start, left.end, right.start, right.end]) {
+    assert.match(bound, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
+  }
+  assert.ok(Date.parse(right.start) > Date.parse(left.end) - 1000)
+})
 
 test("context preparation owns recursive coverage, one enrichment pass, and request caching", async () => {
   const config = {

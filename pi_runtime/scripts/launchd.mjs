@@ -63,11 +63,30 @@ function waitForUnload() {
   throw new Error(`${label} did not finish unloading within 10 seconds`)
 }
 
+function validateConfig() {
+  const envFile = resolve(root, ".env")
+  const env = {}
+  if (existsSync(envFile)) {
+    for (const line of readFileSync(envFile, "utf8").split(/\r?\n/)) {
+      const matched = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line.trim())
+      if (matched) env[matched[1]] = matched[2]
+    }
+  }
+  const schedule = (env.IM_BOT_PI_MEMORY_WARM_SCHEDULE ?? "07:30,12:30,23:00").trim()
+  if (schedule === "") return
+  for (const entry of schedule.split(",").map((item) => item.trim()).filter(Boolean)) {
+    if (!/^([01]?\d|2[0-3]):[0-5]\d$/.test(entry)) {
+      throw new Error(`IM_BOT_PI_MEMORY_WARM_SCHEDULE contains invalid HH:MM entry: "${entry}"`)
+    }
+  }
+}
+
 function install() {
   if (process.platform !== "darwin") throw new Error("launchd installation is only supported on macOS")
   if (!existsSync(resolve(root, "var", "pi-auth", "auth.json"))) {
     throw new Error("Pi model credential is missing; configure it before installing the service")
   }
+  validateConfig()
   mkdirSync(resolve(root, "logs"), { recursive: true, mode: 0o700 })
   mkdirSync(resolve(root, "var"), { recursive: true, mode: 0o700 })
   mkdirSync(targetDir, { recursive: true, mode: 0o700 })

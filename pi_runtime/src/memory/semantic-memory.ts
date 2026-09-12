@@ -151,12 +151,23 @@ export class SemanticMemory {
     this.retriever = new HybridMemoryRetriever(options.memory)
   }
 
+  /**
+   * Extracts facts for up to `maxChunks` pending-message chunks and persists
+   * them with entity edges and supersession. Safe to call concurrently from
+   * callers that share the instance; chunk state is transactional and retried
+   * per chunk, so a failing chunk never blocks the others.
+   *
+   * When `window` is provided, pending messages inside that time range are
+   * chunked first (freshest-relevant priority) so interactive queries get the
+   * newest evidence; remaining quota falls back to globally oldest pending.
+   */
   async enrich(
     maxChunks: number,
     signal?: AbortSignal,
     onUsage?: (usage: RuntimeUsage) => void,
+    window?: { start: number; end: number },
   ): Promise<SemanticEnrichmentResult> {
-    const chunks = this.prepareChunks(Math.max(1, Math.min(maxChunks, 30)))
+    const chunks = this.prepareChunks(Math.max(1, Math.min(maxChunks, 30)), window)
     const result: SemanticEnrichmentResult = {
       queuedChunks: chunks.length,
       completedChunks: 0,
@@ -222,8 +233,27 @@ export class SemanticMemory {
     return this.retriever.getFactEvidence(refs)
   }
 
-  private prepareChunks(maxChunks: number): SemanticChunk[] {
+  private prepareChunks(maxChunks: number, window?: { start: number; end: number }): SemanticChunk[] {
+    const limit = Math.max(1, Math.min(maxChunks, 30))
+    if (window === undefined) {
+      return this.prepareChunksForRange(undefined, limit)
+    }
+    const relevant = this.prepareChunksForRange(window, limit)
+    const remaining = limit - relevant.length
+    if (remaining <= 0) return relevant
+    const oldest = this.prepareChunksForRange(undefined, remaining)
+    const seen = new Set(relevant.map((chunk) => chunk.id))
+    return [...relevant, ...oldest.filter((chunk) => !seen.has(chunk.id))]
+  }
+
+  private prepareChunksForRange(
+    window: { start: number; end: number } | undefined,
+    maxChunks: number,
+  ): SemanticChunk[] {
     const sourceLimit = maxChunks * Math.max(4, this.options.sessionizer.maxPrimaryMessages) * 3
+    const windowClause = window === undefined ? "" : " AND m.sent_at >= ? AND m.sent_at <= ?"
+    const windowParams = window === undefined ? [] : [window.start, window.end]
+    const orderClause = window === undefined ? " ORDER BY source_seq ASC, m.sent_at ASC" : " ORDER BY m.sent_at DESC"
     const pendingValues = this.db.prepare(
       `SELECT m.id, m.revision, m.conversation_id, m.sender_display_name, m.content_text,
               m.sent_at, m.is_self, c.type AS conversation_type, c.title AS conversation_title,
@@ -234,16 +264,15 @@ export class SemanticMemory {
                           AND k.entity_id = m.id), 0) AS source_seq
        FROM memory_messages m
        JOIN memory_conversations c ON c.id = m.conversation_id
-       WHERE m.owner_key = ? AND m.learning_eligible = 1
+       WHERE m.owner_key = ? AND m.learning_eligible = 1${windowClause}
          AND NOT EXISTS (
            SELECT 1 FROM memory_chunk_messages cm
            JOIN memory_chunks ch ON ch.id = cm.chunk_id
            WHERE cm.message_id = m.id AND cm.message_revision = m.revision
              AND cm.role = 'primary' AND ch.status = 'completed'
-         )
-       ORDER BY source_seq ASC, m.sent_at ASC
+         )${orderClause}
        LIMIT ?`,
-    ).all(this.ownerKey, sourceLimit)
+    ).all(this.ownerKey, ...windowParams, sourceLimit)
     const pendingRows = pendingValues.flatMap((value) => {
       const item = row<PendingMessageRow>(value)
       return item === null ? [] : [item]

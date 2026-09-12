@@ -3,13 +3,22 @@ import { ProcessedMessageStore } from "./infra/state.js"
 import { hashIdentifier, sleep, truncateText } from "./infra/safety.js"
 import { UsageLedger, type UsageLedgerStatus } from "./infra/usage-ledger.js"
 import { PiRuntimeExecutionError } from "./agent/pi-runtime.js"
+import {
+  buildWelcomeCard,
+  quickTaskPromptFromCardAction,
+  quickTasksFromConfig,
+} from "./agent/welcome-card.js"
+import { readFile, writeFile, rename, mkdir } from "node:fs/promises"
+import { dirname } from "node:path"
 import type {
   AcceptedMessage,
   AgentRuntime,
+  CardActionEvent,
   ConversationTurn,
   IncomingMessageEvent,
   LarkGateway,
   MessageConsumer,
+  MessageConsumerCallbacks,
   OwnerIdentity,
   RuntimeConfig,
   RuntimeTelemetry,
@@ -67,6 +76,10 @@ export class PiBotService {
   private draining = false
   private stopping = false
   private consumer: MessageConsumer | null = null
+  private cardConsumer: MessageConsumer | null = null
+  private cardConsumerRestartAttempt = 0
+  private cardConsumerDisabled = false
+  private welcomeCardSendInFlight: Promise<void> | null = null
   private restartAttempt = 0
   private authTimer: NodeJS.Timeout | null = null
   private authVerification: Promise<OwnerIdentity> | null = null
@@ -109,6 +122,16 @@ export class PiBotService {
       botNameConfigured: lark.botName !== null,
     })
     await this.startConsumer()
+    try {
+      await this.startCardActionConsumer()
+    } catch (error) {
+      // The card callback event must be subscribed in the Feishu developer
+      // console first. A missing subscription must not take down messaging.
+      this.cardConsumerDisabled = true
+      logger.error("card_action_consumer_unavailable", error, {
+        hint: "subscribe card.action.trigger in the developer console and restart",
+      })
+    }
   }
 
   async stop(): Promise<void> {
@@ -117,6 +140,7 @@ export class PiBotService {
     if (this.authTimer) clearInterval(this.authTimer)
     logger.info("pi_service_stopping", { queued: this.pending.length, inFlight: this.inFlight.size })
     this.consumer?.stop()
+    this.cardConsumer?.stop()
   }
 
   private async startConsumer(): Promise<void> {
@@ -161,6 +185,147 @@ export class PiBotService {
     void this.drain()
   }
 
+  private async startCardActionConsumer(): Promise<void> {
+    if (this.stopping || !this.owner) return
+    const consumer = this.gateway.startCardActionConsumer({
+      onEvent: (event) => this.acceptCardAction(event),
+      onMalformedEvent: (error) => logger.error("card_action_malformed_event", error),
+      onDiagnostic: (state) => logger.info("card_action_consumer_state", { state }),
+      onExit: ({ code, signal }) => void this.onCardConsumerExit(code, signal),
+    })
+    this.cardConsumer = consumer
+    await consumer.ready
+    this.cardConsumerRestartAttempt = 0
+    logger.info("card_action_consumer_ready", {})
+  }
+
+  /**
+   * Sends the welcome card after the first completed warm-up, throttled by
+   * a persisted last-sent timestamp: a restart within the throttle window
+   * stays silent, a fresh start delivers a card. The Feishu idempotency key
+   * is unique per process start, so the server never swallows a legitimate
+   * re-send; crash loops are contained by this local throttle instead.
+   */
+  async sendWelcomeCardAfterWarmUp(): Promise<void> {
+    if (this.welcomeCardSendInFlight !== null) {
+      await this.welcomeCardSendInFlight
+      return
+    }
+    const operation = (async () => {
+      if (this.stopping || !this.owner) return
+      const lastSentAt = await this.readWelcomeCardSentAt()
+      if (lastSentAt !== null && Date.now() - lastSentAt < this.config.welcomeCardThrottleMs) {
+        logger.info("welcome_card_throttled", {
+          lastSentAt: new Date(lastSentAt).toISOString(),
+          throttleMs: this.config.welcomeCardThrottleMs,
+        })
+        return
+      }
+      const tasks = quickTasksFromConfig(this.config)
+      const result = await this.gateway.sendCardMessage({
+        userOpenId: this.owner.ownerOpenId,
+        card: buildWelcomeCard(tasks),
+      })
+      await this.writeWelcomeCardSentAt(Date.now())
+      logger.info("welcome_card_sent", { message: hashIdentifier(result.messageId) })
+    })().catch((error) => {
+      logger.error("welcome_card_send_failed", error)
+    }).finally(() => {
+      this.welcomeCardSendInFlight = null
+    })
+    this.welcomeCardSendInFlight = operation
+    await operation
+  }
+
+  private async readWelcomeCardSentAt(): Promise<number | null> {
+    try {
+      const parsed: unknown = JSON.parse(await readFile(this.config.welcomeCardStateFile, "utf8"))
+      if (typeof parsed !== "object" || parsed === null) return null
+      const value = (parsed as { lastSentAt?: unknown }).lastSentAt
+      return typeof value === "number" && Number.isFinite(value) ? value : null
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null
+      logger.error("welcome_card_state_read_failed", error)
+      return null
+    }
+  }
+
+  private async writeWelcomeCardSentAt(at: number): Promise<void> {
+    const path = this.config.welcomeCardStateFile
+    try {
+      await mkdir(dirname(path), { recursive: true, mode: 0o700 })
+      const temp = `${path}.${process.pid}.tmp`
+      await writeFile(temp, `${JSON.stringify({ lastSentAt: at }, null, 2)}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+      })
+      await rename(temp, path)
+    } catch (error) {
+      logger.error("welcome_card_state_write_failed", error)
+    }
+  }
+
+  private acceptCardAction(event: CardActionEvent): void {
+    if (!this.owner) return
+    if (event.operator_id !== this.owner.ownerOpenId) return
+    const eventId = typeof event.event_id === "string" ? event.event_id : null
+    if (eventId === null) return
+    const dedupKey = `card_${eventId}`
+    if (this.store.has(dedupKey) || this.inFlight.has(dedupKey)) {
+      logger.info("card_action_duplicate_ignored", { event: hashIdentifier(eventId) })
+      return
+    }
+    const chatId = typeof event.chat_id === "string" ? event.chat_id : ""
+    const messageId = typeof event.message_id === "string" ? event.message_id : ""
+    if (chatId === "" || !messageId.startsWith("om_")) return
+    const prompt = quickTaskPromptFromCardAction(event, quickTasksFromConfig(this.config))
+    if (prompt === null) {
+      logger.info("card_action_ignored", { event: hashIdentifier(eventId) })
+      return
+    }
+    if (this.pending.length >= this.config.maxQueue) {
+      logger.warn("card_action_queue_full", { event: hashIdentifier(eventId), queued: this.pending.length })
+      return
+    }
+    this.inFlight.add(dedupKey)
+    this.pending.push({
+      messageId: dedupKey,
+      content: prompt,
+      messageType: "text",
+      createTime: null,
+      chatId,
+      receivedAt: new Date().toISOString(),
+      replyToMessageId: messageId,
+    })
+    logger.info("card_action_task_queued", { event: hashIdentifier(eventId), queued: this.pending.length })
+    void this.drain()
+  }
+
+  private async onCardConsumerExit(code: number | null, signal: NodeJS.Signals | null): Promise<void> {
+    logger.warn("card_action_consumer_exited", { code, signal, stopping: this.stopping })
+    if (this.stopping || this.cardConsumerDisabled) return
+    this.cardConsumerRestartAttempt += 1
+    if (this.cardConsumerRestartAttempt > 5) {
+      this.cardConsumerDisabled = true
+      logger.error("card_action_consumer_disabled_after_retries", null, {
+        attempts: this.cardConsumerRestartAttempt - 1,
+      })
+      return
+    }
+    const delayMs = Math.min(30_000, 1000 * 2 ** Math.min(this.cardConsumerRestartAttempt - 1, 5))
+    logger.warn("card_action_consumer_restart_scheduled", {
+      attempt: this.cardConsumerRestartAttempt,
+      delayMs,
+    })
+    await sleep(delayMs)
+    try {
+      await this.startCardActionConsumer()
+    } catch (error) {
+      logger.error("card_action_consumer_restart_failed", error, { attempt: this.cardConsumerRestartAttempt })
+      await this.onCardConsumerExit(null, null)
+    }
+  }
+
   private async drain(): Promise<void> {
     if (this.draining) return
     this.draining = true
@@ -193,6 +358,12 @@ export class PiBotService {
     return this.conversationHistory.slice(-maxTurns)
   }
 
+  /**
+   * Serial per-message pipeline: auth (with retry) → agent run → final reply →
+   * conversation history → dedup mark → usage ledger. Any failure maps to a
+   * ledger status (runtime_failed / delivery_failed / host_failed) and an
+   * optional generic error reply.
+   */
   private async processMessage(message: AcceptedMessage): Promise<void> {
     const hash = hashIdentifier(message.messageId)
     const startedAt = Date.now()
@@ -209,7 +380,10 @@ export class PiBotService {
       model: this.config.model ?? "unknown",
     }
     try {
-      await this.verifyUserAuth()
+      await this.verifyUserAuthWithRetry(
+        this.config.authVerifyMessageAttempts,
+        this.config.authVerifyMessageRetryDelayMs,
+      )
       const recentConversation = this.recentConversation()
       const result = await this.runtime.run({
         text: message.content,
@@ -220,7 +394,8 @@ export class PiBotService {
       })
       telemetry = result
       runtimeCompleted = true
-      await this.gateway.replyToMessage(message.messageId, result.reply, "final")
+      const replyTarget = message.replyToMessageId ?? message.messageId
+      await this.gateway.replyToMessage(replyTarget, result.reply, "final")
       finalReplyDelivered = true
       const nowIso = new Date().toISOString()
       this.recordConversationTurn({ role: "user", text: message.content, at: message.receivedAt })
@@ -251,7 +426,7 @@ export class PiBotService {
       logger.error("message_processing_failed", error, { message: hash, durationMs: Date.now() - startedAt })
       if (this.config.replyOnError) {
         try {
-          await this.replyAndMark(message.messageId, genericErrorReply, "error")
+          await this.replyAndMark(message.replyToMessageId ?? message.messageId, genericErrorReply, "error")
         } catch (replyError) {
           logger.error("error_reply_failed", replyError, { message: hash })
         }
@@ -301,6 +476,26 @@ export class PiBotService {
         this.authVerification = null
       })
     return this.authVerification
+  }
+
+  private async verifyUserAuthWithRetry(attempts: number, delayMs: number): Promise<OwnerIdentity> {
+    let lastError: unknown
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        return await this.verifyUserAuth()
+      } catch (error) {
+        lastError = error
+        if (attempt === attempts) break
+        logger.warn("user_auth_verify_retry_scheduled", {
+          attempt,
+          attempts,
+          delayMs,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        await sleep(delayMs * attempt)
+      }
+    }
+    throw lastError
   }
 
   private async replyAndMark(

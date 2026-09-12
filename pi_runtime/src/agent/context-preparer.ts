@@ -61,14 +61,16 @@ function payloadMayHaveMore(value: unknown): boolean {
   return visit(value, 0)
 }
 
-function splitWindow(window: TimeWindow, minWindowMs: number): [TimeWindow, TimeWindow] | null {
+export function splitWindow(window: TimeWindow, minWindowMs: number): [TimeWindow, TimeWindow] | null {
   const { startAt, endAt } = validateRange(window.start, window.end)
   if (endAt - startAt < minWindowMs) return null
   const middle = Math.trunc(startAt + (endAt - startAt) / 2)
   if (middle <= startAt || middle >= endAt) return null
+  const toSecondPrecision = (value: number): string =>
+    new Date(Math.floor(value / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, "Z")
   return [
-    { start: new Date(startAt).toISOString(), end: new Date(middle).toISOString() },
-    { start: new Date(middle + 1).toISOString(), end: new Date(endAt).toISOString() },
+    { start: toSecondPrecision(startAt), end: toSecondPrecision(middle) },
+    { start: toSecondPrecision(middle + 1), end: toSecondPrecision(endAt) },
   ]
 }
 
@@ -107,6 +109,9 @@ export interface ContextPreparerOptions {
   memory: OfficeMemory
   semantic: SemanticMemory
   onUsage?: (usage: RuntimeUsage) => void
+  maxChunks?: number
+  /** When true, semantic extraction prioritizes chunks inside the requested range. */
+  prioritizeRequestWindow?: boolean
 }
 
 export class ContextPreparer {
@@ -115,6 +120,12 @@ export class ContextPreparer {
 
   constructor(private readonly options: ContextPreparerOptions) {}
 
+  /**
+   * Brings the memory database up to the requested coverage: computes missing
+   * time windows, syncs them from Lark (splitting on pagination), hydrates
+   * bodies, then runs at most one bounded semantic update. Identical requests
+   * within this preparer share a single in-flight promise.
+   */
   prepare(input: PrepareOfficeContextInput, signal?: AbortSignal): Promise<PrepareOfficeContextResult> {
     validateRange(input.start, input.end)
     const normalized: Required<Pick<PrepareOfficeContextInput, "start" | "end" | "freshness" | "semantic">> &
@@ -258,10 +269,15 @@ export class ContextPreparer {
     if (input.semantic === "facts" && this.options.semantic.pendingMessageCount() > 0) {
       const ownsSemanticUpdate = this.semanticUpdate === null
       if (this.semanticUpdate === null) {
+        const rangeStart = Date.parse(input.start)
+        const rangeEnd = Date.parse(input.end)
         this.semanticUpdate = this.options.semantic.enrich(
-          this.options.config.memoryExtractionMaxChunks,
+          this.options.maxChunks ?? this.options.config.memoryExtractionMaxChunks,
           signal,
           this.options.onUsage,
+          this.options.prioritizeRequestWindow === true && Number.isFinite(rangeStart) && Number.isFinite(rangeEnd)
+            ? { start: rangeStart, end: rangeEnd }
+            : undefined,
         )
       }
       const enrichment = await this.semanticUpdate

@@ -1,4 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core"
+import type { OfficeMemory, SemanticMemory } from "./memory/index.js"
 
 export interface RuntimeConfig {
   projectRoot: string
@@ -19,6 +20,12 @@ export interface RuntimeConfig {
   memoryHybridTokenBudget: number
   memoryPrepareMaxWindows: number
   memoryPrepareMinWindowMs: number
+  memoryWarmSchedule: string
+  memoryWarmInitialDelayMs: number
+  memoryWarmLookbackDays: number
+  memoryWarmMaxChunks: number
+  welcomeCardThrottleMs: number
+  welcomeCardStateFile: string
   historyTurns: number
   historyTurnMaxChars: number
   conversationIdleResetMs: number
@@ -31,6 +38,8 @@ export interface RuntimeConfig {
   runtimeTimeoutMs: number
   toolTimeoutMs: number
   authVerifyIntervalMs: number
+  authVerifyMessageAttempts: number
+  authVerifyMessageRetryDelayMs: number
   allowedUserOpenId: string | null
   maxQueue: number
   maxInputChars: number
@@ -128,6 +137,8 @@ export interface AcceptedMessage {
   createTime: string | null
   chatId: string
   receivedAt: string
+  /** When set, final replies go to this card message instead of the synthetic trigger. */
+  replyToMessageId?: string
 }
 
 export interface MessageConsumer {
@@ -169,10 +180,33 @@ export interface LarkGateway {
   getIncompleteTasks(input: { pageLimit: number }, signal?: AbortSignal): Promise<unknown>
   runReadOnlyCli(args: string[], signal?: AbortSignal): Promise<{ stdout: string }>
   replyToMessage(messageId: string, markdown: string, stage?: "processing" | "final" | "error" | "overloaded"): Promise<void>
+  sendCardMessage(input: { userOpenId: string; card: unknown }): Promise<{ messageId: string }>
   startMessageConsumer(callbacks: MessageConsumerCallbacks): MessageConsumer
+  startCardActionConsumer(callbacks: CardActionConsumerCallbacks): MessageConsumer
+}
+
+export interface CardActionEvent {
+  event_id?: unknown
+  operator_id?: unknown
+  message_id?: unknown
+  chat_id?: unknown
+  action_tag?: unknown
+  action_value?: unknown
+}
+
+export interface CardActionConsumerCallbacks {
+  onEvent(event: CardActionEvent): void
+  onMalformedEvent?(error: unknown): void
+  onDiagnostic?(state: "ready" | "connected" | "exited"): void
+  onExit?(result: { code: number | null; signal: NodeJS.Signals | null }): void
 }
 
 export interface AgentRuntime {
   check(): Promise<{ provider: string; model: string; auth: string | null }>
   run(request: RuntimeRequest): Promise<RuntimeResult>
+}
+
+export interface MemoryBackedRuntime extends AgentRuntime {
+  memory: OfficeMemory
+  semantic: SemanticMemory
 }

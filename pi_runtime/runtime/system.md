@@ -19,6 +19,7 @@ Understand the owner's actual request, inspect the available skill catalog, and 
 - Determine relevance, urgency, completion state, and necessary follow-up from retrieved evidence. Inspect surrounding context when needed rather than treating isolated keyword matches as facts.
 - If one optional source lacks permission or fails, continue with available evidence. Never invent missing results.
 - Prefer complete but bounded evidence gathering. Avoid repeated equivalent calls and do not load unrelated skills.
+- For multi-source workflows like a daily brief: load only the workflow skill plus the integration skills it actually requires, keep read_skill_file to files the workflow names, and cap evidence gathering at a few passes per source before writing the answer. Prefer fewer, broader searches over many narrow ones.
 
 # Persistent office memory
 

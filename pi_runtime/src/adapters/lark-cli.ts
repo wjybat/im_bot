@@ -3,6 +3,8 @@ import { createInterface } from "node:readline"
 import { CommandError, parseJson, runCommand } from "../infra/command.js"
 import { replyIdempotencyKey, truncateText } from "../infra/safety.js"
 import type {
+  CardActionConsumerCallbacks,
+  CardActionEvent,
   IncomingMessageEvent,
   LarkGateway,
   MessageConsumer,
@@ -10,6 +12,8 @@ import type {
   OwnerIdentity,
   RuntimeConfig,
 } from "../types.js"
+
+const processStartTime = Date.now()
 
 const quietEnv = Object.freeze({
   LARKSUITE_CLI_NO_UPDATE_NOTIFIER: "1",
@@ -88,6 +92,16 @@ export class LarkCliGateway implements LarkGateway {
     return parseJson(result.stdout, "lark-cli")
   }
 
+  /**
+   * Runs a lark-cli command after verifying its self-declared risk level.
+   * Only `Risk: read` commands (or explicit --dry-run) are allowed; write,
+   * auth, and event-consumer commands are rejected before execution.
+   */
+  /**
+   * Runs a lark-cli command after verifying its self-declared risk level.
+   * Only `Risk: read` commands (or explicit --dry-run) are allowed; write,
+   * auth, and event-consumer commands are rejected before execution.
+   */
   async runReadOnlyCli(args: string[], signal?: AbortSignal): Promise<{ stdout: string }> {
     if (args.length === 0 || args.length > 64) throw new Error("lark-cli args must contain 1 to 64 items")
     if (args.some((arg) => typeof arg !== "string" || arg.includes("\u0000") || arg.length > 20_000)) {
@@ -355,24 +369,58 @@ export class LarkCliGateway implements LarkGateway {
     }
   }
 
-  startMessageConsumer(callbacks: MessageConsumerCallbacks): MessageConsumer {
-    const child = spawn(
-      this.config.larkCli,
+  /**
+   * Sends an interactive card to the owner's P2P chat as the bot.
+   * The idempotency key is unique per process start, so every service
+   * restart may deliver a card; call-side throttling is owned by the
+   * service via its welcome-card state file.
+   */
+  async sendCardMessage(input: { userOpenId: string; card: unknown }): Promise<{ messageId: string }> {
+    const key = replyIdempotencyKey(input.userOpenId, `welcome-card-${processStartTime}`)
+    const envelope = asRecord(await this.run(
       [
-        "event",
-        "consume",
-        "im.message.receive_v1",
+        "im",
+        "+messages-send",
         "--as",
         "bot",
-        "--jq",
-        'select(.chat_type=="p2p" and .sender_type=="user")',
+        "--user-id",
+        input.userOpenId,
+        "--msg-type",
+        "interactive",
+        "--content",
+        JSON.stringify(input.card),
+        "--idempotency-key",
+        key,
+        "--format",
+        "json",
       ],
-      {
-        cwd: this.config.projectRoot,
-        env: { ...process.env, ...quietEnv },
-        stdio: ["pipe", "pipe", "pipe"],
-      },
+      { timeoutMs: 90_000 },
+    ))
+    const data = asRecord(envelope?.data)
+    if (typeof data?.message_id !== "string") throw new Error("card send returned no message id")
+    return { messageId: data.message_id }
+  }
+
+  startMessageConsumer(callbacks: MessageConsumerCallbacks): MessageConsumer {
+    return this.startEventConsumer(
+      ["event", "consume", "im.message.receive_v1", "--as", "bot", "--jq", 'select(.chat_type=="p2p" and .sender_type=="user")'],
+      callbacks,
     )
+  }
+
+  startCardActionConsumer(callbacks: CardActionConsumerCallbacks): MessageConsumer {
+    return this.startEventConsumer(["event", "consume", "card.action.trigger", "--as", "bot"], callbacks)
+  }
+
+  private startEventConsumer(
+    args: string[],
+    callbacks: MessageConsumerCallbacks | CardActionConsumerCallbacks,
+  ): MessageConsumer {
+    const child = spawn(this.config.larkCli, args, {
+      cwd: this.config.projectRoot,
+      env: { ...process.env, ...quietEnv },
+      stdio: ["pipe", "pipe", "pipe"],
+    })
     let settled = false
     let readyResolve: () => void = () => undefined
     let readyReject: (error: unknown) => void = () => undefined
@@ -383,7 +431,7 @@ export class LarkCliGateway implements LarkGateway {
     createInterface({ input: child.stdout }).on("line", (line) => {
       if (line.trim() === "") return
       try {
-        callbacks.onEvent(JSON.parse(line) as IncomingMessageEvent)
+        callbacks.onEvent(JSON.parse(line) as IncomingMessageEvent & CardActionEvent)
       } catch (error) {
         callbacks.onMalformedEvent?.(error)
       }

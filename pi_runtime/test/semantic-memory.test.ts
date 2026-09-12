@@ -297,3 +297,58 @@ test("failed extraction is auditable and retries the same pending revision", asy
     memory.close()
   }
 })
+
+test("window-prioritized enrichment extracts in-range pending messages first", async () => {
+  const config = loadConfig()
+  const memory = new OfficeMemory({ path: ":memory:", ownerExternalId: "ou_owner" })
+  try {
+    const oldDay = {
+      messages: [
+        {
+          message_id: "om_window_old",
+          chat_id: "oc_window_old",
+          chat_type: "group",
+          chat_name: "旧消息群",
+          create_time: "2026-08-01T09:00:00+08:00",
+          sender: { open_id: "ou_lead", name: "负责人", type: "user" },
+          content: "旧任务：请整理上季度的复盘材料",
+        },
+      ],
+    }
+    const recentDay = {
+      messages: [
+        {
+          message_id: "om_window_new",
+          chat_id: "oc_window_new",
+          chat_type: "group",
+          chat_name: "新消息群",
+          create_time: "2026-09-10T09:00:00+08:00",
+          sender: { open_id: "ou_lead", name: "负责人", type: "user" },
+          content: "新任务：请确认今天下午的评审时间",
+        },
+      ],
+    }
+    memory.ingestLarkPayload(oldDay, { source: "test", resource: "chat.message" })
+    memory.ingestLarkPayload(recentDay, { source: "test", resource: "chat.message" })
+
+    const extractor = new FakeFactExtractor()
+    const semantic = createTestSemantic(memory, config, extractor)
+
+    // Without a window: globally oldest first.
+    await semantic.enrich(1)
+    assert.equal(extractor.calls.length, 1)
+    assert.match(extractor.calls[0]?.content ?? "", /上季度的复盘材料/)
+
+    // With a window covering only the recent message: it is extracted first.
+    const secondExtractor = new FakeFactExtractor()
+    const secondSemantic = createTestSemantic(memory, config, secondExtractor)
+    await secondSemantic.enrich(1, undefined, undefined, {
+      start: Date.parse("2026-09-09T00:00:00+08:00"),
+      end: Date.parse("2026-09-11T00:00:00+08:00"),
+    })
+    assert.equal(secondExtractor.calls.length, 1)
+    assert.match(secondExtractor.calls[0]?.content ?? "", /评审时间/)
+  } finally {
+    memory.close()
+  }
+})

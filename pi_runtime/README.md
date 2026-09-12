@@ -1,202 +1,87 @@
 # Feishu Pi Agent Runtime
 
-这是当前个人办公助手 Runtime。它以 `@earendil-works/pi-agent-core` 替代 `codex exec`，加载项目内版本化的集成 Skills 与流程 Skills，并由真实模型自主选择 Skill、参考资源和工具。当前首先接入飞书，真实运行默认使用 DMall AI Router 的 `gpt-5.6-luna`。
+个人飞书办公助手 Runtime。以 `@earendil-works/pi-agent-core` 驱动真实模型自主选择 Skill、参考资源和工具；宿主只负责身份校验、消息队列、记忆管线和回复发送，不做关键词路由。当前接入飞书，默认使用 DMall AI Router 的 `gpt-5.6-luna`。
 
-## 已实现
+## 能做什么
 
-- TypeScript/Node.js 运行时，Node 要求 `>=22.19.0`。
-- 每次请求创建独立 Pi `Agent`，上下文不会继承 Codex 的全局 Skills/插件。
-- 完整同步本机 27 个 `lark-*` 集成 Skills，涵盖 IM、日历、任务、邮件、文档、云盘、审批、会议、妙记、OKR、表格、知识库等域。
-- `load_skill` 渐进加载完整 `SKILL.md`，`read_skill_file` 读取任意 Skill 的引用、模板或工作流资源，`run_lark_cli` 执行飞书 Skill 选择的命令。
-- 不维护自定义的飞书流程摘要 Skill，不在宿主里预设消息、日历或任务路由。
-- Agent 自主选择工具；宿主不存在关键词到固定命令的路由。
-- User 身份只用于个人数据读取；事件接收和最终回复使用 Bot 身份。
-- Owner-only P2P 输入闸、串行队列、消息 ID 去重、幂等回复、定期用户凭据验证。
-- 收到消息后立即发送“正在读取办公上下文”回执；处理完成后再发送最终回答。
-- Runtime 超时、最大 turn、分页、工具输出和回复长度上限。
-- Pi Token、缓存 Token、工具轨迹和基于官方价格的参考成本统计。
-- 每条飞书消息一条聚合 Token/成本台账，记录成功、Runtime 失败和最终回复失败产生的实际用量。
-- 单进程 SQLite 办公记忆：原始响应、规范化会话/消息、revision、Outbox、独立 FTS 游标和全文检索。
-- 五个通用记忆工具：业务状态、上下文准备、原文搜索、混合上下文检索和证据展开。分页、自动拆窗、幂等同步与单次事实更新由上下文准备器内部完成，不暴露给 Agent。
-- 会话切片采用 primary + context 证据结构；LLM 抽取 ACTION_ITEM、REQUEST、DELEGATION、COMMITMENT、DECISION、STATUS、DEADLINE、RISK，并强制绑定 primary 原文。
-- SQLite 轻量图保存 Person/Project/System/Organization/Document/Event 实体，以及 ABOUT、ASSIGNED_TO、EVIDENCE_FROM、AUTHORED_BY、PART_OF、SUPERSEDES 等有类型边。
-- 混合检索并行使用消息 FTS、事实 FTS、结构化状态/期限、消息时序和一跳实体图，再以 RRF 融合、去重并按 Token 预算打包。
-- 防污染硬闸：用户与办公助手的控制私聊、Agent 自产内容、空内容和禁用会话不会进入办公 FTS，规则不依赖模型提示词。
+- **即时问答**：基于本地办公记忆（消息、事实、轻量图谱）回答消息/待办/决策类问题，必要时实时查飞书校验
+- **每日工作简报**：`daily-work-brief` 工作流综合消息、日历、任务、审批、会议生成昨日小结/今日规划/本周关注
+- **自主多域检索**：27 个 `lark-*` 集成 Skill 覆盖 IM、日历、任务、邮件、文档、云盘、审批、会议、妙记、OKR、表格、知识库等域
+- **持续学习**：后台固定时刻预热同步消息并抽取事实，构建知识图谱；多轮对话连续性（追问可用）
+- **成本可观测**：每条消息聚合 Token/成本台账
 
-## 验证
+## 快速开始
 
 ```bash
 cd im_bot/pi_runtime
 npm install --ignore-scripts
-npm run verify
-npm run demo
-npm run smoke:lark
-npm run test:real
-npm run test:real:memory
+npm run verify        # typecheck + 单测 + build
+npm run demo          # 离线 Faux 演示
+npm run smoke:lark    # 真实 lark-cli 只读链路冒烟
+npm run test:real     # 真实模型 + 真实飞书只读验收
+npm run test:real:memory  # 内存库跑通完整记忆链路
 ```
 
-`npm test` 中的 Faux Provider 只承担确定性的工具协议单元测试，不作为运行效果验收。
+## 配置与运行
 
-`smoke:lark` 仍使用本地 Faux 模型，但会通过真实 `lark-cli --as user` 执行当天消息只读检索；它只输出工具轨迹，不展示消息内容，也不发送飞书回复。
+项目启动时通过 `process.loadEnvFile()` 自动读取根目录 `.env`（shell 环境优先，`.env` 只补充）。`.env` 被 Git 忽略，只提交 `.env.example`。完整配置清单见 `.env.example` 与 [`docs/runtime.md`](docs/runtime.md#配置速查)。
 
-`test:real` 使用真实 `gpt-5.6-luna` 和真实飞书只读消息，检查模型自主加载 Skill、选择消息工具、执行多轮推理并生成不泄露内部 ID 的办公助理回答。
+### 接入模型
 
-`test:real:memory` 使用内存数据库跑通真实“每日简报 → 高层上下文准备 → 混合检索 → 证据核验”链路，不发送飞书回复，也不改正式记忆库。
+- **DMall AI Router（当前）**：`IM_BOT_PI_PROVIDER=dmall-ai` + `npm run auth:set-dmall-key`，密钥写入 `var/pi-auth/auth.json`（0600）
+- **OpenAI Codex OAuth**：`IM_BOT_PI_PROVIDER=openai-codex` + `npm run auth:openai-codex`
+- **API Key**：`openai` / `anthropic` + 对应 `*_API_KEY`
 
-同步本机最新版官方 Skills：
+不要把任何密钥写进仓库、plist 或命令行参数。
 
-```bash
-npm run skills:sync
-```
-
-同步结果写入 `runtime/skills/integrations/lark/`，应随项目一起版本管理。后续平台集成放在 `integrations/`，稳定工作流放在 `workflows/`，项目定制能力放在 `custom/`。
-
-当前项目工作流：
-
-- `daily-work-brief`：当用户询问每日简报、日报、今日总结、目前要做什么或跨来源待办时，综合授权账号的消息、日历、任务及相关邮件、审批、会议和文档，形成昨日小结、今日规划、本周关注、备注四模块简报。
-
-## 接入真实模型
-
-项目启动时通过 Node.js 原生 `process.loadEnvFile()` 自动读取根目录 `.env`。显式 shell 或 launchd 环境变量优先，`.env` 只补充未设置项。`.env` 保存本机非敏感配置并被 Git 忽略；只提交 `.env.example`。
-
-### DMall AI Router（当前）
+### 运行方式
 
 ```bash
-export IM_BOT_PI_PROVIDER=dmall-ai
-export IM_BOT_PI_BASE_URL=https://ai-router.dmall.com/v1
-export IM_BOT_PI_MODEL=gpt-5.6-luna
-npm run auth:set-dmall-key
-```
-
-`auth:set-dmall-key` 从标准输入读取密钥，写入 Git 忽略的 `var/pi-auth/auth.json`，文件权限为 `0600`。不要把密钥写进 `.env.example`、源码、launchd plist 或命令行参数。
-
-### OpenAI Codex / ChatGPT Plus-Pro OAuth
-
-```bash
-export IM_BOT_PI_PROVIDER=openai-codex
-npm run models
-export IM_BOT_PI_MODEL='<从上一步输出选择的模型 ID>'
-npm run auth:openai-codex
-```
-
-OAuth 凭据写入 `var/pi-auth/auth.json`，目录权限 `0700`、文件权限 `0600`。Runtime 使用 Pi 的自动刷新流程，不复用 `lark-cli` 或旧 Codex 的凭据。
-
-### OpenAI 或 Anthropic API Key
-
-```bash
-export IM_BOT_PI_PROVIDER=openai
-export IM_BOT_PI_MODEL='<model-id>'
-export OPENAI_API_KEY='<secret>'
-```
-
-或设置 `IM_BOT_PI_PROVIDER=anthropic`、`ANTHROPIC_API_KEY`。不要把任何密钥写入仓库。
-
-### 只运行一次，不回复飞书
-
-```bash
-npm run check
-npm run once -- '整理一下今天有什么需要我处理的事情'
-```
-
-`once` 会真实读取当前用户可见的飞书数据，但只把回答打印到本地，不发送消息。
-
-### 前台监听并回复
-
-```bash
-npm run listen
-```
-
-该命令会消费 `im.message.receive_v1`，只接受当前授权 owner 发给 Bot 的 P2P 文本/富文本消息，并由宿主以 Bot 身份发送处理中回执和最终回复。
-
-### macOS 常驻服务
-
-```bash
-npm run service:install
+npm run check                          # 只验连通，不回复
+npm run once -- '今天有什么要处理的'    # 真实读取，回答只打印本地
+npm run listen                         # 前台监听并回复
+npm run service:install                # macOS launchd 常驻
 npm run service:status
 npm run service:uninstall
 ```
 
-当前服务标签为 `com.local.im-data-collection.pi-bot`。launchd plist 只保存 HOME、PATH、`lark-cli` 和程序路径；Provider、模型、API 地址、思考强度及运行限制统一从 `.env` 读取。API Key 仍只保存在权限为 `0600` 的凭据文件中。
+服务标签 `com.local.im-data-collection.pi-bot`。只接受当前授权 owner 发给 Bot 的 P2P 文本/富文本消息；launchd 安装时会校验配置（含预热 schedule 格式），坏配置拒绝安装。
 
-## 代码边界
+## 架构索引
 
 ```text
-src/adapters/lark-cli.ts  飞书 CLI、User/Bot 身份与事件连接
-src/service.ts            Owner 闸、队列、去重、刷新、回复
-src/agent/pi-runtime.ts   Pi Agent 生命周期、turn/timeout/usage
-src/agent/tools.ts        Skill、记忆和 Lark CLI 通用受控工具
-src/memory/               SQLite 证据/事实/图、切片抽取、Outbox、FTS、RRF 与上下文打包
+src/main.ts               入口：demo/smoke/check/models/once/listen 子命令
+src/service.ts            消息闸、队列、鉴权重试、对话历史、回复编排
+src/adapters/lark-cli.ts  飞书 CLI、User/Bot 身份、事件流、只读风控
+src/agent/pi-runtime.ts   Pi Agent 生命周期、turn/timeout/usage 聚合
+src/agent/tools.ts        Skill 加载与受控工具的组合入口
+src/agent/memory-tools.ts 五个记忆工具（status/prepare/search×2/evidence）
+src/agent/context-preparer.ts  覆盖计算、缺窗同步、水合、单次事实更新
+src/agent/memory-warmer.ts     固定时刻后台预热调度
+src/memory/               SQLite 记忆库：规范化、切片、抽取、图、FTS、RRF
+src/infra/                状态去重、成本台账、安全脱敏、日志
 runtime/system.md         Runtime 身份、安全和自主规划提示词
-runtime/skills/integrations/lark/  版本化的飞书集成 Skills
-runtime/skills/workflows/          稳定可复用的业务工作流 Skills
-runtime/skills/custom/             项目自定义 Skills
-src/demo/                 无外部写入的离线流程
+runtime/skills/           版本化 Skills（integrations/workflows/custom）
+test/                     单测 + 真实链路集成测试
 ```
 
-Pi 没有获得通用 Bash、文件编辑或飞书写工具。`run_lark_cli` 会在执行前读取命令声明的 Risk，仅允许 `Risk: read`、Schema、事件元数据和通用 GET；写命令、认证变更、事件消费者和 `--yes` 会被宿主拒绝。模型不能直接发送回复；唯一远端写入路径仍是宿主的 `replyToMessage()`。
+**详细设计文档**：
 
-默认单次请求最多允许 50 个 Agent turn（可通过 `IM_BOT_PI_MAX_TURNS` 配置到 100），同时仍受 10 分钟 Runtime 总超时约束。
+- [`docs/runtime.md`](docs/runtime.md) —— 消息生命周期、对话历史、鉴权、launchd、配置速查
+- [`docs/memory.md`](docs/memory.md) —— 记忆分层、上下文准备、事实抽取、混合检索、防污染、后台预热
 
-## 办公上下文记忆
+## 安全边界
 
-记忆数据库默认位于：
+- Pi 没有通用 Bash、文件编辑或飞书写工具。`run_lark_cli` 执行前读命令声明的 Risk，仅放行 `Risk: read`；写命令、认证变更、`--yes` 一律拒绝
+- 唯一远端写入路径是宿主的 `replyToMessage()`；模型不能自发消息
+- 防污染硬闸在数据库写入层执行：助手控制私聊、Agent 自产内容、空内容不进入可检索记忆（详见 [`docs/memory.md`](docs/memory.md#防污染guards)）
+- 最终回复强制脱敏内部标识（app/open/chat/message ID、token、内存句柄）
 
-```text
-var/office-memory.db
-```
+## 当前限制
 
-数据库文件权限为 `0600`，目录已被 Git 忽略。上下文准备器或受支持的 IM 只读命令返回消息后，宿主会在同一事务中保存原始响应、规范化消息和 Outbox 变更，再由独立游标增量更新 FTS。相同消息重复拉取不会重复入库；编辑后的内容会递增 revision 并替换搜索索引。
-
-`prepare_office_context` 是 Agent 唯一需要了解的准备入口。它会检查已有覆盖，只拉取缺口；分页截断时在内部自动拆分时间窗；全部窗口结束后最多执行一次有界事实更新；同一 Agent run 内的相同请求直接复用结果。返回值只表达 `ready/partial`、消息覆盖和语义可用性，不暴露游标、序列水位、拆窗建议或抽取开关。
-
-本地记忆是飞书数据的可检索镜像，不是最终事实源。Agent 会根据问题时效决定是否先同步飞书；记忆缺失、过期或需要完整话题上下文时仍可直接调用 Lark 只读工具。
-
-### 事实与轻量图
-
-内部语义处理器只处理尚未由成功 chunk 覆盖的消息 revision。相邻消息按会话、90 分钟空闲边界、1400 Token 和 20 条 primary 消息切片，并为每个片段补最多 5 条前文作为 context。模型输出的每条事实必须引用至少一个 primary 证据；只引用 context、引用不存在序号或没有证据的事实会在写库前被拒绝。
-
-同一 `fact_type + topic_key` 的后续状态不会覆盖删除历史：新事实将旧事实标记为非 current，并写入 `SUPERSEDES` 边。消息编辑会产生新 revision，旧 revision 独占的事实会失效；相同结论由新消息重复确认时则合并证据和置信度。
-
-抽取默认复用当前真实模型，思考强度为 `low`，单个 chunk 独立限制为 2 分钟和 4096 输出 Token，每次上下文准备最多处理 3 个 chunk。某个 chunk 超时只会留下可重试的 failed run，不阻止 Agent 使用已经同步的原文继续回答。每次抽取的模型、Prompt 版本、成功/失败、Token、成本和结构化输出均写入 extraction run；这部分 usage 也会合并进触发它的那条飞书消息成本台账。
-
-### 混合检索
-
-`search_office_context` 同时召回：
-
-- 事实 FTS 与原消息 FTS；
-- current 状态、owner 直接相关事项和明确期限；
-- 指定时间范围的最近消息；
-- 查询命中的实体及其一跳关联事实。
-
-各路分数不可直接比较，因此只使用排名做 Reciprocal Rank Fusion（默认 `k=60`）。融合后去掉重复事实，以及已经作为事实 evidence 出现的重复消息，再按 `IM_BOT_PI_MEMORY_CONTEXT_TOKENS` 预算装配完整证据项。`fact_...` / `mem_...` 只作为内部回查句柄，最终回答的宿主脱敏层会强制移除。
-
-防污染策略在数据库写入层执行：
-
-- 收到 owner 的 P2P 指令时，宿主先把当前 chat 标记为 `assistant_control`；该会话里用户和 Bot 的所有消息均不可检索。
-- 本地 `once` 等没有事件 chat_id 的路径优先用当前应用 ID 识别自己的 P2P Bot 会话；取不到应用 ID 时，只在应用名称能唯一精确匹配一个会话时保守回填，匹配不唯一时不猜测。
-- 显式标记为 `origin=agent` 的内容永久排除。
-- 空消息、Bot/告警会话和关闭学习的会话具有独立拒绝原因，为后续范围治理保留审计能力。
-- 原始响应可以保留用于解析重放，但只有通过准入守卫的消息进入 FTS 和 Agent 证据检索。
-
-## Token 与成本台账
-
-Pi 从 OpenAI Responses usage 中读取普通输入、缓存读取、缓存写入、输出和 reasoning Token。Agent 主循环与事实抽取工具内部的 LLM usage 会一起聚合。项目不会保存逐 turn 台账，只在每条飞书消息完成后把所有调用汇总为一条记录：
-
-```text
-var/usage-ledger.jsonl
-```
-
-台账文件权限为 `0600`，不包含消息正文或原始消息 ID。每条记录包括请求哈希、成功/失败状态、模型、总 turns、工具调用次数、聚合 Token、分项成本、总成本、价格快照和最终回复是否送达。
-
-GPT-5.6 Luna 的参考价格从 `.env` 读取。默认采用 OpenAI 官方公开价格；DMall AI Router 未在 `/models` 返回价格，因此台账成本标记为 `reference_estimate`，不代表 DMall 内部实际结算账单。
-
-## 当前生产化缺口
-
-- Mac 睡眠时本地长连接仍会暂停；尚未实现唤醒后的消息补拉 checkpoint。
-- 当前已接入消息证据、事实和轻量图记忆，但尚未实现后台周期同步、日历/任务/邮件/文档规范化、向量检索、图社区聚类和跨月事实压缩。
-- JSON 凭据存储只做进程内串行和原子替换，生产多进程部署需要跨进程文件锁或密钥服务。
-- 日历读取权限当前可能缺失；Agent 会把它当可选来源并继续使用消息/任务。
-- 已有处理中回执；尚未加入流式增量回答、失败分类卡片、重试队列和死信队列。
-- 生产部署前需要容器/服务账户权限收敛、审计、指标、告警和依赖安全扫描。
+- Mac 睡眠时长连接暂停，尚未实现唤醒后补拉 checkpoint
+- 记忆已覆盖消息/事实/图谱与后台预热；日历/任务/邮件/文档暂不走记忆，每次实时查
+- 尚未实现流式增量回答、失败分类卡片、重试/死信队列
+- 多进程部署需要跨进程文件锁或密钥服务（当前单进程假设）
 
 Pi 源码固定信息见 [`THIRD_PARTY.md`](THIRD_PARTY.md)。

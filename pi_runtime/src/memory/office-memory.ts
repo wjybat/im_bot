@@ -190,6 +190,11 @@ export class OfficeMemory {
     return inspectLarkMessagePayload(payload, options)
   }
 
+  /**
+   * Idempotently ingests a Lark message-search / mget / chat-list JSON payload.
+   * Same messages never duplicate; edited content bumps the revision and
+   * replaces the FTS entry. Eligibility is enforced at this write boundary.
+   */
   ingestLarkPayload(payload: unknown, context: MemoryIngestContext): MemoryIngestResult {
     this.assertOpen()
     const inspected = this.inspectLarkPayload(payload, context.fallbackConversationExternalId)
@@ -282,6 +287,10 @@ export class OfficeMemory {
     return affected
   }
 
+  /**
+   * Full-text search over eligible source messages only (assistant-control
+   * and agent-generated content is excluded at the write boundary, not here).
+   */
   search(input: MemorySearchInput = {}): MemorySearchHit[] {
     this.assertOpen()
     this.drainFts()
@@ -532,12 +541,14 @@ export class OfficeMemory {
       if (cursor > endAt) break
     }
     if (cursor <= endAt) missing.push({ start: cursor, end: endAt })
+    const toSecondPrecision = (value: number): string =>
+      new Date(Math.floor(value / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, "Z")
     return {
       complete: missing.length === 0,
       coveredThrough: contiguous <= startAt ? null : isoShanghai(Math.min(endAt, contiguous - 1)),
       missingRanges: missing.map((range) => ({
-        start: new Date(range.start).toISOString(),
-        end: new Date(range.end).toISOString(),
+        start: toSecondPrecision(range.start),
+        end: toSecondPrecision(range.end),
       })),
     }
   }

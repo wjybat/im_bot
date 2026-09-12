@@ -95,6 +95,15 @@ export function loadConfig(): RuntimeConfig {
     memoryPrepareMaxWindows: integer("IM_BOT_PI_MEMORY_PREPARE_MAX_WINDOWS", 16, 1, 64),
     memoryPrepareMinWindowMs:
       integer("IM_BOT_PI_MEMORY_PREPARE_MIN_WINDOW_SECONDS", 60, 1, 3600) * 1000,
+    memoryWarmSchedule:
+      process.env.IM_BOT_PI_MEMORY_WARM_SCHEDULE || "07:30,12:30,23:00",
+    memoryWarmInitialDelayMs:
+      integer("IM_BOT_PI_MEMORY_WARM_INITIAL_DELAY_SECONDS", 30, 0, 3600) * 1000,
+    memoryWarmLookbackDays: integer("IM_BOT_PI_MEMORY_WARM_LOOKBACK_DAYS", 14, 1, 90),
+    memoryWarmMaxChunks: integer("IM_BOT_PI_MEMORY_WARM_MAX_CHUNKS", 10, 1, 30),
+    welcomeCardThrottleMs:
+      integer("IM_BOT_PI_WELCOME_CARD_THROTTLE_MINUTES", 15, 0, 10_080) * 60_000,
+    welcomeCardStateFile: resolve(projectRoot, "var", "welcome-card.json"),
     historyTurns: integer("IM_BOT_PI_HISTORY_TURNS", 8, 0, 40),
     historyTurnMaxChars: integer("IM_BOT_PI_HISTORY_TURN_CHARS", 4000, 100, 12_000),
     conversationIdleResetMs:
@@ -110,6 +119,9 @@ export function loadConfig(): RuntimeConfig {
     runtimeTimeoutMs: integer("IM_BOT_PI_TIMEOUT_MS", 600_000, 10_000, 1_800_000),
     toolTimeoutMs: integer("IM_BOT_PI_TOOL_TIMEOUT_MS", 120_000, 5_000, 600_000),
     authVerifyIntervalMs: integer("IM_BOT_PI_AUTH_VERIFY_INTERVAL_MS", 600_000, 60_000, 3_600_000),
+    authVerifyMessageAttempts: integer("IM_BOT_PI_AUTH_VERIFY_MESSAGE_ATTEMPTS", 3, 1, 10),
+    authVerifyMessageRetryDelayMs:
+      integer("IM_BOT_PI_AUTH_VERIFY_MESSAGE_RETRY_DELAY_MS", 2_000, 500, 60_000),
     allowedUserOpenId: process.env.IM_BOT_ALLOWED_USER_OPEN_ID || null,
     maxQueue: integer("IM_BOT_PI_MAX_QUEUE", 20, 1, 1000),
     maxInputChars: integer("IM_BOT_PI_MAX_INPUT_CHARS", 20_000, 100, 100_000),

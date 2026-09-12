@@ -2,6 +2,7 @@
 import { loadConfig } from "./config.js"
 import { LarkCliGateway } from "./adapters/lark-cli.js"
 import { createConfiguredModels } from "./agent/model.js"
+import { MemoryWarmer } from "./agent/memory-warmer.js"
 import { createDemoPiRuntime, createLivePiRuntime } from "./agent/pi-runtime.js"
 import { MockLarkGateway } from "./demo/mock-lark.js"
 import { logger } from "./infra/logger.js"
@@ -127,14 +128,23 @@ async function runListener(): Promise<void> {
   const gateway = new LarkCliGateway(config)
   const runtime = await createLivePiRuntime(config, gateway)
   const service = new PiBotService(config, gateway, runtime)
+  const warmer = new MemoryWarmer({
+    config,
+    gateway,
+    memory: runtime.memory,
+    semantic: runtime.semantic,
+    onWarmedOnce: () => void service.sendWelcomeCardAfterWarmUp(),
+  })
   const stop = async (signal: NodeJS.Signals): Promise<void> => {
     logger.info("signal_received", { signal })
+    await warmer.stop()
     await service.stop()
     setTimeout(() => process.exit(0), 1000).unref()
   }
   process.once("SIGINT", () => void stop("SIGINT"))
   process.once("SIGTERM", () => void stop("SIGTERM"))
   await service.start()
+  warmer.start()
 }
 
 async function main(): Promise<void> {
