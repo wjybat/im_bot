@@ -3,6 +3,7 @@ import { Type } from "@earendil-works/pi-ai"
 import { truncateText } from "../infra/safety.js"
 import { logger } from "../infra/logger.js"
 import type { OfficeMemory, SemanticMemory } from "../memory/index.js"
+import { RunLarkCliUnsupportedError } from "../types.js"
 import type { LarkGateway, RuntimeConfig, RuntimeUsage } from "../types.js"
 import { createMemoryTools, ingestMessageToolOutput } from "./memory-tools.js"
 import type { RuntimeSkills } from "./skills.js"
@@ -52,7 +53,30 @@ export function createRuntimeTools(
         larkReadCache.set(cacheKey, operation)
         operation.catch(() => larkReadCache.delete(cacheKey))
       }
-      const { output, memoryIngest } = await operation
+      let resolved: Awaited<typeof operation>
+      try {
+        resolved = await operation
+      } catch (error) {
+        if (error instanceof RunLarkCliUnsupportedError) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: [
+                  "此部署不支持 run_lark_cli（无本地 lark-cli 通道）。",
+                  "请改用结构化记忆与上下文工具完成同一目标：",
+                  "- 消息检索/同步：prepare_office_context、search_office_memory、search_office_context",
+                  "- 证据展开：get_memory_evidence；状态检查：get_memory_status",
+                  "- 日程与任务已由上下文准备器覆盖；其余来源（邮件/审批等）在当前部署不可用，请基于可用证据继续作答并说明缺口的来源。",
+                ].join("\n"),
+              },
+            ],
+            details: { unsupported: true, command: params.args.slice(0, 3) },
+          }
+        }
+        throw error
+      }
+      const { output, memoryIngest } = resolved
       return {
         content: [
           {

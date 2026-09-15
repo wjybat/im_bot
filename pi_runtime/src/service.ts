@@ -30,11 +30,13 @@ const overloadedReply = "当前正在处理的请求较多，请稍后再发一�
 
 export function validateIncomingEvent(
   event: IncomingMessageEvent,
-  ownerOpenId: string,
+  ownerCheck: string | ((openId: unknown) => boolean),
   maxInputChars: number,
 ): AcceptedMessage | null {
   if (event.chat_type !== "p2p" || event.sender_type !== "user") return null
-  if (event.sender_id !== ownerOpenId) return null
+  const allowed =
+    typeof ownerCheck === "string" ? event.sender_id === ownerCheck : ownerCheck(event.sender_id)
+  if (!allowed) return null
   if (typeof event.message_id !== "string" || !event.message_id.startsWith("om_")) return null
   if (typeof event.chat_id !== "string" || event.chat_id.trim() === "") return null
   if (typeof event.content !== "string") return null
@@ -68,9 +70,11 @@ function zeroUsage(): RuntimeUsage {
 }
 
 export class PiBotService {
-  private readonly store: ProcessedMessageStore
-  private readonly usageLedger: UsageLedger
-  private owner: OwnerIdentity | null = null
+  protected readonly store: ProcessedMessageStore
+  protected readonly usageLedger: UsageLedger
+  protected readonly config: RuntimeConfig
+  protected readonly gateway: LarkGateway
+  protected readonly runtime: AgentRuntime
   private readonly pending: AcceptedMessage[] = []
   private readonly inFlight = new Set<string>()
   private draining = false
@@ -78,18 +82,23 @@ export class PiBotService {
   private consumer: MessageConsumer | null = null
   private cardConsumer: MessageConsumer | null = null
   private cardConsumerRestartAttempt = 0
-  private cardConsumerDisabled = false
+  protected cardConsumerDisabled = false
   private welcomeCardSendInFlight: Promise<void> | null = null
   private restartAttempt = 0
   private authTimer: NodeJS.Timeout | null = null
   private authVerification: Promise<OwnerIdentity> | null = null
-  private readonly conversationHistory: ConversationTurn[] = []
+  private readonly conversationHistories = new Map<string, ConversationTurn[]>()
+  /** Single-owner mode retains this field; multi-tenant subclasses override resolveOwner. */
+  private owner: OwnerIdentity | null = null
 
   constructor(
-    private readonly config: RuntimeConfig,
-    private readonly gateway: LarkGateway,
-    private readonly runtime: AgentRuntime,
+    config: RuntimeConfig,
+    gateway: LarkGateway,
+    runtime: AgentRuntime,
   ) {
+    this.config = config
+    this.gateway = gateway
+    this.runtime = runtime
     this.store = new ProcessedMessageStore(config.stateFile)
     this.usageLedger = new UsageLedger(config.usageLedgerFile)
   }
@@ -143,8 +152,29 @@ export class PiBotService {
     this.cardConsumer?.stop()
   }
 
-  private async startConsumer(): Promise<void> {
-    if (this.stopping || !this.owner) return
+  /**
+   * Decides whether a user may talk to this bot. Single-owner deployments
+   * compare against the configured owner; multi-user deployments override
+   * this with their own allowlist and authorization state.
+   */
+  protected isAllowedUser(senderOpenId: string | null): boolean {
+    if (senderOpenId === null || this.owner === null) return false
+    return senderOpenId === this.owner.ownerOpenId
+  }
+
+  /**
+   * Resolves the owner identity that a message belongs to. Single-owner
+   * deployments return the startup identity; multi-user deployments resolve
+   * per sender. Returning null rejects the message.
+   */
+  protected resolveOwner(senderOpenId: string | null): OwnerIdentity | null {
+    if (!this.owner) return null
+    if (senderOpenId !== null && senderOpenId !== this.owner.ownerOpenId) return null
+    return this.owner
+  }
+
+  protected async startConsumer(): Promise<void> {
+    if (this.stopping) return
     const consumer = this.gateway.startMessageConsumer({
       onEvent: (event) => this.acceptEvent(event),
       onMalformedEvent: (error) => logger.error("malformed_event", error),
@@ -154,13 +184,20 @@ export class PiBotService {
     this.consumer = consumer
     await consumer.ready
     this.restartAttempt = 0
-    logger.info("pi_service_ready", { owner: hashIdentifier(this.owner.ownerOpenId) })
+    logger.info("pi_service_ready", { owner: this.owner ? hashIdentifier(this.owner.ownerOpenId) : "multi" })
   }
 
   private acceptEvent(event: IncomingMessageEvent): void {
-    if (!this.owner) return
-    const accepted = validateIncomingEvent(event, this.owner.ownerOpenId, this.config.maxInputChars)
+    const senderOpenId = typeof event.sender_id === "string" ? event.sender_id : null
+    if (!this.isAllowedUser(senderOpenId)) return
+    const accepted = validateIncomingEvent(event, () => true, this.config.maxInputChars)
     if (!accepted) return
+    if (senderOpenId !== null) accepted.senderOpenId = senderOpenId
+    this.enqueueAccepted(accepted)
+  }
+
+  /** Shared queueing path for message events and card actions. */
+  protected enqueueAccepted(accepted: AcceptedMessage): void {
     const hash = hashIdentifier(accepted.messageId)
     if (this.store.has(accepted.messageId) || this.inFlight.has(accepted.messageId)) {
       logger.info("message_duplicate_ignored", { message: hash })
@@ -185,7 +222,7 @@ export class PiBotService {
     void this.drain()
   }
 
-  private async startCardActionConsumer(): Promise<void> {
+  protected async startCardActionConsumer(): Promise<void> {
     if (this.stopping || !this.owner) return
     const consumer = this.gateway.startCardActionConsumer({
       onEvent: (event) => this.acceptCardAction(event),
@@ -266,8 +303,8 @@ export class PiBotService {
   }
 
   private acceptCardAction(event: CardActionEvent): void {
-    if (!this.owner) return
-    if (event.operator_id !== this.owner.ownerOpenId) return
+    const operatorId = typeof event.operator_id === "string" ? event.operator_id : null
+    if (!this.isAllowedUser(operatorId)) return
     const eventId = typeof event.event_id === "string" ? event.event_id : null
     if (eventId === null) return
     const dedupKey = `card_${eventId}`
@@ -296,6 +333,7 @@ export class PiBotService {
       chatId,
       receivedAt: new Date().toISOString(),
       replyToMessageId: messageId,
+      ...(operatorId !== null ? { senderOpenId: operatorId } : {}),
     })
     logger.info("card_action_task_queued", { event: hashIdentifier(eventId), queued: this.pending.length })
     void this.drain()
@@ -339,23 +377,33 @@ export class PiBotService {
     }
   }
 
-  private recordConversationTurn(turn: ConversationTurn): void {
+  private conversationHistoryFor(userKey: string): ConversationTurn[] {
+    let history = this.conversationHistories.get(userKey)
+    if (history === undefined) {
+      history = []
+      this.conversationHistories.set(userKey, history)
+    }
+    return history
+  }
+
+  private recordConversationTurn(userKey: string, turn: ConversationTurn): void {
     const maxTurns = this.config.historyTurns * 2
     if (maxTurns === 0) return
-    const previous = this.conversationHistory[this.conversationHistory.length - 1]
+    const history = this.conversationHistoryFor(userKey)
+    const previous = history[history.length - 1]
     if (previous !== undefined) {
       const previousAt = Date.parse(previous.at)
       if (Number.isFinite(previousAt) && Date.parse(turn.at) - previousAt > this.config.conversationIdleResetMs) {
-        this.conversationHistory.length = 0
+        history.length = 0
       }
     }
-    this.conversationHistory.push(turn)
-    while (this.conversationHistory.length > maxTurns) this.conversationHistory.shift()
+    history.push(turn)
+    while (history.length > maxTurns) history.shift()
   }
 
-  private recentConversation(): ConversationTurn[] {
+  private recentConversationFor(userKey: string): ConversationTurn[] {
     const maxTurns = this.config.historyTurns * 2
-    return this.conversationHistory.slice(-maxTurns)
+    return this.conversationHistoryFor(userKey).slice(-maxTurns)
   }
 
   /**
@@ -366,6 +414,14 @@ export class PiBotService {
    */
   private async processMessage(message: AcceptedMessage): Promise<void> {
     const hash = hashIdentifier(message.messageId)
+    const owner = this.resolveOwner(message.senderOpenId ?? null)
+    if (owner === null) {
+      logger.warn("message_owner_unresolved", { message: hash })
+      this.inFlight.delete(message.messageId)
+      return
+    }
+    const userKey = owner.ownerOpenId
+    await this.beforeProcessMessage(owner, message)
     const startedAt = Date.now()
     let runtimeCompleted = false
     let finalReplyDelivered = false
@@ -383,13 +439,15 @@ export class PiBotService {
       await this.verifyUserAuthWithRetry(
         this.config.authVerifyMessageAttempts,
         this.config.authVerifyMessageRetryDelayMs,
+        owner.ownerOpenId,
       )
-      const recentConversation = this.recentConversation()
+      const recentConversation = this.recentConversationFor(userKey)
       const result = await this.runtime.run({
         text: message.content,
         requestId: hash,
-        sessionId: `feishu-owner-${hashIdentifier(this.owner?.ownerOpenId ?? "owner")}`,
+        sessionId: `feishu-owner-${hashIdentifier(userKey)}`,
         assistantControlChatId: message.chatId,
+        ownerOpenId: owner.ownerOpenId,
         ...(recentConversation.length > 0 ? { recentConversation } : {}),
       })
       telemetry = result
@@ -398,8 +456,8 @@ export class PiBotService {
       await this.gateway.replyToMessage(replyTarget, result.reply, "final")
       finalReplyDelivered = true
       const nowIso = new Date().toISOString()
-      this.recordConversationTurn({ role: "user", text: message.content, at: message.receivedAt })
-      this.recordConversationTurn({ role: "assistant", text: result.reply, at: nowIso })
+      this.recordConversationTurn(userKey, { role: "user", text: message.content, at: message.receivedAt })
+      this.recordConversationTurn(userKey, { role: "assistant", text: result.reply, at: nowIso })
       await this.store.mark(message.messageId)
       status = "success"
       logger.info("message_processed", {
@@ -457,17 +515,26 @@ export class PiBotService {
     }
   }
 
-  private scheduleAuthVerification(): void {
+  /**
+   * Per-message hook fired before processing. Multi-tenant subclasses use it
+   * to bind the active owner on the gateway (owner-scoped reads).
+   */
+  protected async beforeProcessMessage(owner: OwnerIdentity, message: AcceptedMessage): Promise<void> {
+    void owner
+    void message
+  }
+
+  protected scheduleAuthVerification(): void {
     this.authTimer = setInterval(() => {
       void this.verifyUserAuth().catch((error) => logger.error("user_auth_refresh_failed", error))
     }, this.config.authVerifyIntervalMs)
     this.authTimer.unref()
   }
 
-  private async verifyUserAuth(): Promise<OwnerIdentity> {
+  private async verifyUserAuth(ownerOpenId?: string): Promise<OwnerIdentity> {
     if (this.authVerification) return this.authVerification
     this.authVerification = this.gateway
-      .ensureUserIdentity(this.owner?.ownerOpenId ?? this.config.allowedUserOpenId)
+      .ensureUserIdentity(ownerOpenId ?? this.owner?.ownerOpenId ?? this.config.allowedUserOpenId)
       .then((identity) => {
         logger.info("user_auth_verified", { tokenStatus: identity.tokenStatus })
         return identity
@@ -478,11 +545,11 @@ export class PiBotService {
     return this.authVerification
   }
 
-  private async verifyUserAuthWithRetry(attempts: number, delayMs: number): Promise<OwnerIdentity> {
+  private async verifyUserAuthWithRetry(attempts: number, delayMs: number, ownerOpenId?: string): Promise<OwnerIdentity> {
     let lastError: unknown
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
-        return await this.verifyUserAuth()
+        return await this.verifyUserAuth(ownerOpenId)
       } catch (error) {
         lastError = error
         if (attempt === attempts) break

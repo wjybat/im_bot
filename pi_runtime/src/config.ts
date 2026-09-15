@@ -92,6 +92,7 @@ export function loadConfig(): RuntimeConfig {
     memoryExtractionMaxChunks: integer("IM_BOT_PI_MEMORY_MAX_CHUNKS", 3, 1, 30),
     memoryExtractionMaxAttempts: integer("IM_BOT_PI_MEMORY_MAX_ATTEMPTS", 3, 1, 10),
     memoryHybridTokenBudget: integer("IM_BOT_PI_MEMORY_CONTEXT_TOKENS", 12000, 500, 64000),
+    memorySearchCallsPerRun: integer("IM_BOT_PI_MEMORY_SEARCH_CALLS_PER_RUN", 8, 1, 100),
     memoryPrepareMaxWindows: integer("IM_BOT_PI_MEMORY_PREPARE_MAX_WINDOWS", 16, 1, 64),
     memoryPrepareMinWindowMs:
       integer("IM_BOT_PI_MEMORY_PREPARE_MIN_WINDOW_SECONDS", 60, 1, 3600) * 1000,
@@ -100,6 +101,7 @@ export function loadConfig(): RuntimeConfig {
     memoryWarmInitialDelayMs:
       integer("IM_BOT_PI_MEMORY_WARM_INITIAL_DELAY_SECONDS", 30, 0, 3600) * 1000,
     memoryWarmLookbackDays: integer("IM_BOT_PI_MEMORY_WARM_LOOKBACK_DAYS", 14, 1, 90),
+    memoryWarmInitialLookbackDays: integer("IM_BOT_PI_MEMORY_WARM_INITIAL_LOOKBACK_DAYS", 7, 1, 90),
     memoryWarmMaxChunks: integer("IM_BOT_PI_MEMORY_WARM_MAX_CHUNKS", 10, 1, 30),
     welcomeCardThrottleMs:
       integer("IM_BOT_PI_WELCOME_CARD_THROTTLE_MINUTES", 15, 0, 10_080) * 60_000,
@@ -117,11 +119,19 @@ export function loadConfig(): RuntimeConfig {
     model: process.env.IM_BOT_PI_MODEL || "gpt-5.6-luna",
     thinkingLevel: thinkingLevel(),
     runtimeTimeoutMs: integer("IM_BOT_PI_TIMEOUT_MS", 600_000, 10_000, 1_800_000),
+    runtimeStreamRetries: integer("IM_BOT_PI_STREAM_RETRIES", 2, 0, 5),
+    runtimeStreamRetryDelayMs: integer("IM_BOT_PI_STREAM_RETRY_DELAY_MS", 2_000, 250, 60_000),
     toolTimeoutMs: integer("IM_BOT_PI_TOOL_TIMEOUT_MS", 120_000, 5_000, 600_000),
     authVerifyIntervalMs: integer("IM_BOT_PI_AUTH_VERIFY_INTERVAL_MS", 600_000, 60_000, 3_600_000),
     authVerifyMessageAttempts: integer("IM_BOT_PI_AUTH_VERIFY_MESSAGE_ATTEMPTS", 3, 1, 10),
     authVerifyMessageRetryDelayMs:
       integer("IM_BOT_PI_AUTH_VERIFY_MESSAGE_RETRY_DELAY_MS", 2_000, 500, 60_000),
+    allowedUserOpenIds: (process.env.IM_BOT_PI_ALLOWED_USER_OPEN_IDS || "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry !== ""),
+    oauthCallbackPort: integer("IM_BOT_PI_OAUTH_CALLBACK_PORT", 37_731, 0, 65_535),
+    oauthPublicBaseUrl: process.env.IM_BOT_PI_OAUTH_PUBLIC_BASE_URL || "http://localhost:37731",
     allowedUserOpenId: process.env.IM_BOT_ALLOWED_USER_OPEN_ID || null,
     maxQueue: integer("IM_BOT_PI_MAX_QUEUE", 20, 1, 1000),
     maxInputChars: integer("IM_BOT_PI_MAX_INPUT_CHARS", 20_000, 100, 100_000),

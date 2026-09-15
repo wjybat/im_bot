@@ -59,10 +59,27 @@ export function createMemoryTools(
     ...(onUsage ? { onUsage } : {}),
   })
 
+  /**
+   * Per-run budget across both search tools. Broad tasks that fan out into
+   * dozens of narrow searches waste minutes of model reasoning; past the
+   * budget the tools force the model to work with gathered evidence.
+   */
+  let searchBudget = Math.max(1, config.memorySearchCallsPerRun)
+  const consumeSearchBudget = (toolName: string): string | null => {
+    if (searchBudget <= 0) {
+      return [
+        `本任务的检索配额已用尽（${toolName} 已被限制）。`,
+        "请停止继续检索，直接基于已获得的证据完成回答；如确有关键缺口，在回答中说明该部分无法核实。",
+      ].join("\n")
+    }
+    searchBudget -= 1
+    return null
+  }
+
   const searchParameters = Type.Object({
     query: Type.Optional(Type.String({ maxLength: 2_000 })),
     start: Type.Optional(Type.String({ description: "Optional ISO-8601 inclusive lower time bound." })),
-    end: Type.Optional(Type.String({ description: "Optional ISO-8601 inclusive upper time bound." })),
+    end: Type.Optional(Type.String({ description: "Optional ISO-8601 inclusive upper bound." })),
     chatType: Type.Optional(Type.Union([Type.Literal("p2p"), Type.Literal("group")], {
       description: "Restrict only when the task explicitly needs one chat type; omit to cover both private and group chats.",
     })),
@@ -72,10 +89,12 @@ export function createMemoryTools(
     name: "search_office_memory",
     label: "Search source office messages",
     description:
-      "Search locally indexed, evidence-backed Feishu messages. Use prepare_office_context first when the requested range must be current. Assistant-control and agent-generated content is excluded.",
+      "Search locally indexed, evidence-backed Feishu messages. Use prepare_office_context first when the requested range must be current. Assistant-control and agent-generated content is excluded. Prefer a few broad searches (wide time range, per-domain keywords) over many narrow ones; the total number of search calls per task is bounded.",
     parameters: searchParameters,
     executionMode: "parallel",
     async execute(_toolCallId, params) {
+      const blocked = consumeSearchBudget("search_office_memory")
+      if (blocked !== null) return { content: [{ type: "text" as const, text: blocked }], details: { blocked: true } }
       const hits = memory.search(params)
       return textResult({ count: hits.length, hits }, config.maxToolOutputChars, {
         count: hits.length,
@@ -105,10 +124,12 @@ export function createMemoryTools(
     name: "search_office_context",
     label: "Search prepared office context",
     description:
-      "Search prepared facts and source messages through lexical, structured, recency, and graph routes. Results are RRF-fused, deduplicated, evidence-linked, and token-budgeted.",
+      "Search prepared facts and source messages through lexical, structured, recency, and graph routes. Results are RRF-fused, deduplicated, evidence-linked, and token-budgeted. Prefer a few broad searches over many narrow ones; the total number of search calls per task is bounded.",
     parameters: hybridParameters,
     executionMode: "parallel",
     async execute(_toolCallId, params) {
+      const blocked = consumeSearchBudget("search_office_context")
+      if (blocked !== null) return { content: [{ type: "text" as const, text: blocked }], details: { blocked: true } }
       const result = semantic.search({
         ...params,
         tokenBudget: params.tokenBudget ?? config.memoryHybridTokenBudget,

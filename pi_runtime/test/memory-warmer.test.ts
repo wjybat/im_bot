@@ -73,7 +73,7 @@ test("warmer synchronizes the lookback window and extracts facts in the backgrou
   assert.equal(statusBefore.running, false)
   assert.equal(statusBefore.runs, 0)
 
-  await warmer.warmOnce()
+  await warmer.warmOnce(true)
 
   const statusAfter = warmer.status()
   assert.equal(statusAfter.runs, 1)
@@ -83,11 +83,19 @@ test("warmer synchronizes the lookback window and extracts facts in the backgrou
   const now = Date.now()
   const first = gateway.ranges[0]
   assert.ok(first)
-  const lookbackMs = config.memoryWarmLookbackDays * 24 * 60 * 60 * 1000
+  const lookbackMs = config.memoryWarmInitialLookbackDays * 24 * 60 * 60 * 1000
   assert.ok(Date.parse(first.start) <= now - lookbackMs + 5_000)
   assert.ok(Date.parse(first.end) <= now + 5_000)
   assert.equal(extractor.calls.length, 1)
   assert.equal(memory.status().messages, 1)
+
+  // A regular (non-initial) run uses the regular lookback window instead.
+  const regularRangesBefore = gateway.ranges.length
+  await warmer.warmOnce(false)
+  const regularLookbackMs = config.memoryWarmLookbackDays * 24 * 60 * 60 * 1000
+  const regular = gateway.ranges[regularRangesBefore]
+  assert.ok(regular)
+  assert.ok(Date.parse(regular.start) <= now - regularLookbackMs + 5_000)
 })
 
 test("warmer start runs once immediately then arms the next scheduled slot", async (t) => {

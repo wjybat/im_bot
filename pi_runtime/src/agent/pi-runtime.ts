@@ -22,6 +22,8 @@ import type {
   AgentRuntime,
   LarkGateway,
   MemoryBackedRuntime,
+  OwnerMemorySession,
+  OwnerMemorySessionProvider,
   RuntimeConfig,
   RuntimeRequest,
   RuntimeResult,
@@ -43,6 +45,8 @@ interface PiRuntimeOptions {
   skills: RuntimeSkills
   memory: OfficeMemory
   semantic: SemanticMemory
+  /** Optional per-owner memory routing for multi-user deployments. */
+  sessionProvider?: OwnerMemorySessionProvider
 }
 
 function emptyUsage(): RuntimeUsage {
@@ -101,6 +105,7 @@ export class PiAgentRuntime implements MemoryBackedRuntime {
   private readonly model: Model<Api>
   private readonly streamFn: StreamFn
   private readonly skills: RuntimeSkills
+  private readonly sessionProvider: OwnerMemorySessionProvider
 
   constructor(options: PiRuntimeOptions) {
     this.config = options.config
@@ -111,6 +116,17 @@ export class PiAgentRuntime implements MemoryBackedRuntime {
     this.skills = options.skills
     this.memory = options.memory
     this.semantic = options.semantic
+    const defaultSession: OwnerMemorySession = {
+      ownerOpenId: "runtime-owner",
+      ownerName: null,
+      memory: options.memory,
+      semantic: options.semantic,
+    }
+    this.sessionProvider = options.sessionProvider ?? { sessionFor: () => defaultSession }
+  }
+
+  private resolveSession(ownerOpenId: string | null): OwnerMemorySession {
+    return this.sessionProvider.sessionFor(ownerOpenId)
   }
 
   async check(): Promise<{ provider: string; model: string; auth: string | null }> {
@@ -124,15 +140,16 @@ export class PiAgentRuntime implements MemoryBackedRuntime {
 
   async run(request: RuntimeRequest): Promise<RuntimeResult> {
     const startedAt = Date.now()
-    this.memory.markAssistantControlConversation(request.assistantControlChatId)
+    const session = this.resolveSession(request.ownerOpenId ?? null)
+    session.memory.markAssistantControlConversation(request.assistantControlChatId)
     const systemPrompt = await buildSystemPrompt(this.config, this.skills, request)
     const auxiliaryUsage = emptyRuntimeUsage()
     const tools = createRuntimeTools(
       this.config,
       this.gateway,
       this.skills,
-      this.memory,
-      this.semantic,
+      session.memory,
+      session.semantic,
       (usage) => addRuntimeUsage(auxiliaryUsage, usage),
     )
     const allowedTools = new Set(tools.map((tool) => tool.name))
@@ -167,11 +184,6 @@ export class PiAgentRuntime implements MemoryBackedRuntime {
       }
     })
 
-    const timer = setTimeout(() => {
-      timedOut = true
-      agent.abort()
-    }, this.config.runtimeTimeoutMs)
-    timer.unref()
     const telemetry = (): RuntimeTelemetry => ({
       usage: aggregateUsage(agent.state.messages, auxiliaryUsage),
       durationMs: Date.now() - startedAt,
@@ -180,19 +192,51 @@ export class PiAgentRuntime implements MemoryBackedRuntime {
       provider: this.model.provider,
       model: this.model.id,
     })
-    try {
-      await agent.prompt(`USER_MESSAGE_JSON:\n${JSON.stringify({ text: request.text })}`)
-      await agent.waitForIdle()
-      if (timedOut) throw new Error(`Pi runtime exceeded ${this.config.runtimeTimeoutMs} ms`)
-      if (turns >= this.config.maxTurns) {
-        const last = [...agent.state.messages].reverse().find((message) => message.role === "assistant")
-        if (last?.role === "assistant" && last.stopReason === "toolUse") {
-          throw new Error(`Pi runtime exceeded ${this.config.maxTurns} turns without a final answer`)
+
+    const executeAgent = async (): Promise<RuntimeResult> => {
+      const timer = setTimeout(() => {
+        timedOut = true
+        agent.abort()
+      }, this.config.runtimeTimeoutMs)
+      timer.unref()
+      try {
+        await agent.prompt(`USER_MESSAGE_JSON:\n${JSON.stringify({ text: request.text })}`)
+        await agent.waitForIdle()
+        if (timedOut) throw new Error(`Pi runtime exceeded ${this.config.runtimeTimeoutMs} ms`)
+        if (turns >= this.config.maxTurns) {
+          const last = [...agent.state.messages].reverse().find((message) => message.role === "assistant")
+          if (last?.role === "assistant" && last.stopReason === "toolUse") {
+            throw new Error(`Pi runtime exceeded ${this.config.maxTurns} turns without a final answer`)
+          }
         }
+        return {
+          ...telemetry(),
+          reply: truncateText(redactInternalIdentifiers(finalReply(agent.state.messages)), this.config.maxReplyChars),
+        }
+      } finally {
+        clearTimeout(timer)
       }
-      return {
-        ...telemetry(),
-        reply: truncateText(redactInternalIdentifiers(finalReply(agent.state.messages)), this.config.maxReplyChars),
+    }
+
+    try {
+      let attempt = 0
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        try {
+          return await executeAgent()
+        } catch (error) {
+          attempt += 1
+          if (!this.isRetryableStreamError(error) || attempt > this.config.runtimeStreamRetries) {
+            throw error
+          }
+          logger.warn("runtime_stream_retry_scheduled", {
+            attempt,
+            retries: this.config.runtimeStreamRetries,
+            delayMs: this.config.runtimeStreamRetryDelayMs,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          await new Promise((resolve) => setTimeout(resolve, this.config.runtimeStreamRetryDelayMs * attempt))
+        }
       }
     } catch (error) {
       const message = timedOut
@@ -203,9 +247,24 @@ export class PiAgentRuntime implements MemoryBackedRuntime {
       throw new PiRuntimeExecutionError(message, telemetry(), {
         cause: error,
       })
-    } finally {
-      clearTimeout(timer)
     }
+  }
+
+  /**
+   * Transient upstream stream failures worth a full retry: the provider cut
+   * the stream before a terminal event, or the connection dropped mid-turn.
+   * Prompt-cache reuse keeps the retry cost close to the failed attempt.
+   */
+  private isRetryableStreamError(error: unknown): boolean {
+    if (!(error instanceof Error)) return false
+    const message = error.message
+    return (
+      message.includes("stream ended before a terminal response event") ||
+      message.includes("connection closed before response") ||
+      message.includes("aborted by peer") ||
+      message.includes("ECONNRESET") ||
+      message.includes("socket hang up")
+    )
   }
 }
 

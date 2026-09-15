@@ -1,13 +1,22 @@
 #!/usr/bin/env node
 import { loadConfig } from "./config.js"
 import { LarkCliGateway } from "./adapters/lark-cli.js"
-import { createConfiguredModels } from "./agent/model.js"
+import { createConfiguredModels, createModelRuntime } from "./agent/model.js"
 import { MemoryWarmer } from "./agent/memory-warmer.js"
 import { createDemoPiRuntime, createLivePiRuntime } from "./agent/pi-runtime.js"
 import { MockLarkGateway } from "./demo/mock-lark.js"
 import { logger } from "./infra/logger.js"
 import { hashIdentifier } from "./infra/safety.js"
 import { PiBotService } from "./service.js"
+import { MultiUserService } from "./tenant/multi-user-service.js"
+import { MultiUserWarmer } from "./tenant/multi-user-warmer.js"
+import { OwnerMemoryRouter } from "./tenant/memory-router.js"
+import { TenantTokenStore } from "./tenant/token-store.js"
+import { UserTokenManager } from "./tenant/token-manager.js"
+import { OpenApiGateway } from "./tenant/openapi-gateway.js"
+import { TENANT_USER_SCOPES } from "./tenant/types.js"
+import { PiAgentRuntime } from "./agent/pi-runtime.js"
+import { loadRuntimeSkills } from "./agent/skills.js"
 
 function usage(): never {
   throw new Error(
@@ -125,6 +134,10 @@ async function runOnce(prompt: string): Promise<void> {
 
 async function runListener(): Promise<void> {
   const config = loadConfig()
+  if (config.allowedUserOpenIds.length > 0 || process.env.IM_BOT_PI_MULTI_USER === "1") {
+    await runMultiUserListener(config)
+    return
+  }
   const gateway = new LarkCliGateway(config)
   const runtime = await createLivePiRuntime(config, gateway)
   const service = new PiBotService(config, gateway, runtime)
@@ -139,6 +152,88 @@ async function runListener(): Promise<void> {
     logger.info("signal_received", { signal })
     await warmer.stop()
     await service.stop()
+    setTimeout(() => process.exit(0), 1000).unref()
+  }
+  process.once("SIGINT", () => void stop("SIGINT"))
+  process.once("SIGTERM", () => void stop("SIGTERM"))
+  await service.start()
+  warmer.start()
+}
+
+/**
+ * Multi-user (single-tenant) mode: one Feishu app, several colleagues each
+ * OAuth-authorizing the app, per-owner memory/history isolation, direct
+ * OpenAPI access instead of lark-cli.
+ */
+async function runMultiUserListener(config: ReturnType<typeof loadConfig>): Promise<void> {
+  const appId = process.env.IM_BOT_PI_MULTI_APP_ID
+  const appSecret = process.env.IM_BOT_PI_MULTI_APP_SECRET
+  if (!appId || !appSecret) {
+    throw new Error("multi-user mode requires IM_BOT_PI_MULTI_APP_ID and IM_BOT_PI_MULTI_APP_SECRET")
+  }
+  const stateRoot = config.projectRoot
+  const tokenStore = new TenantTokenStore(`${stateRoot}/var/tenant-user-tokens.json`, { appId, appSecret })
+  await tokenStore.load()
+  const tokenManager = new UserTokenManager({
+    app: { appId, appSecret },
+    store: { get: (id) => tokenStore.get(id), upsert: (record) => tokenStore.upsert(record) },
+  })
+  const ownerNames = new Map<string, string | null>()
+  for (const record of tokenStore.list()) ownerNames.set(record.ownerOpenId, record.ownerName)
+  const modelRuntime = createModelRuntime(config)
+  const skills = await loadRuntimeSkills(config.projectRoot, config.skillsDir)
+  const router = new OwnerMemoryRouter({
+    config,
+    modelRuntime,
+    assistantBotExternalId: appId,
+    assistantBotName: null,
+    ownerNames,
+  })
+  const tokenGet = (ownerOpenId: string) => tokenStore.get(ownerOpenId)
+  const tokenRefresh = (ownerOpenId: string) => tokenManager.refresh(ownerOpenId)
+  const gateway = new OpenApiGateway({
+    app: { appId, appSecret },
+    getUserToken: tokenGet,
+    refreshUserToken: tokenRefresh,
+    extraScopes: [...TENANT_USER_SCOPES],
+  })
+  const bootstrapOwner = tokenStore.list()[0]?.ownerOpenId ?? "bootstrap"
+  const anySession = router.sessionFor(bootstrapOwner)
+  const runtime = new PiAgentRuntime({
+    config,
+    gateway,
+    models: modelRuntime.models,
+    model: modelRuntime.model,
+    streamFn: modelRuntime.models.streamSimple.bind(modelRuntime.models),
+    skills,
+    memory: anySession.memory,
+    semantic: anySession.semantic,
+    sessionProvider: router,
+  })
+  const service = new MultiUserService({
+    config,
+    gateway,
+    tokenStore,
+    tokenManager,
+    runtime,
+    sessionProvider: router,
+    buildAuthorizeUrl: (ownerOpenId, redirectUri, state) => gateway.buildAuthorizeUrl(ownerOpenId, redirectUri, state),
+    setActiveOwner: (ownerOpenId) => gateway.setActiveOwner(ownerOpenId),
+  })
+  const warmer = new MultiUserWarmer({
+    config,
+    gateway,
+    router,
+    warmOwners: () =>
+      tokenStore.list().map((record) => ({ ownerOpenId: record.ownerOpenId, ownerName: record.ownerName })),
+    gatewaySetActiveOwner: (ownerOpenId) => gateway.setActiveOwner(ownerOpenId),
+    onWarmedOnce: () => undefined,
+  })
+  const stop = async (signal: NodeJS.Signals): Promise<void> => {
+    logger.info("signal_received", { signal })
+    await warmer.stop()
+    await service.stop()
+    router.close()
     setTimeout(() => process.exit(0), 1000).unref()
   }
   process.once("SIGINT", () => void stop("SIGINT"))

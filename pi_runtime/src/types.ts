@@ -18,11 +18,14 @@ export interface RuntimeConfig {
   memoryExtractionMaxChunks: number
   memoryExtractionMaxAttempts: number
   memoryHybridTokenBudget: number
+  memorySearchCallsPerRun: number
   memoryPrepareMaxWindows: number
   memoryPrepareMinWindowMs: number
   memoryWarmSchedule: string
   memoryWarmInitialDelayMs: number
   memoryWarmLookbackDays: number
+  /** Fresh-start initial warm-up lookback (days); regular warm-ups roll forward from the last synced position. */
+  memoryWarmInitialLookbackDays: number
   memoryWarmMaxChunks: number
   welcomeCardThrottleMs: number
   welcomeCardStateFile: string
@@ -36,10 +39,18 @@ export interface RuntimeConfig {
   model: string | null
   thinkingLevel: ThinkingLevel
   runtimeTimeoutMs: number
+  runtimeStreamRetries: number
+  runtimeStreamRetryDelayMs: number
   toolTimeoutMs: number
   authVerifyIntervalMs: number
   authVerifyMessageAttempts: number
   authVerifyMessageRetryDelayMs: number
+  /** Multi-user mode: comma-separated open_ids allowed to use the bot. Empty = single-owner mode. */
+  allowedUserOpenIds: string[]
+  /** Multi-user mode: OAuth callback HTTP port; 0 disables the OAuth endpoint. */
+  oauthCallbackPort: number
+  /** Multi-user mode: public base URL for OAuth redirects. */
+  oauthPublicBaseUrl: string
   allowedUserOpenId: string | null
   maxQueue: number
   maxInputChars: number
@@ -76,6 +87,20 @@ export interface RuntimeRequest {
   now?: Date
   assistantControlChatId?: string | null
   recentConversation?: readonly ConversationTurn[]
+  /** Per-request owner scope for multi-user deployments; defaults to the runtime owner. */
+  ownerOpenId?: string | null
+}
+
+export interface OwnerMemorySession {
+  ownerOpenId: string
+  ownerName: string | null
+  memory: OfficeMemory
+  semantic: SemanticMemory
+}
+
+/** Resolves the owner-scoped memory pair for a request. Single-owner runtimes return one shared pair. */
+export interface OwnerMemorySessionProvider {
+  sessionFor(ownerOpenId: string | null): OwnerMemorySession
 }
 
 export interface ConversationTurn {
@@ -139,6 +164,8 @@ export interface AcceptedMessage {
   receivedAt: string
   /** When set, final replies go to this card message instead of the synthetic trigger. */
   replyToMessageId?: string
+  /** Per-message owner (multi-tenant); falls back to the service owner. */
+  senderOpenId?: string
 }
 
 export interface MessageConsumer {
@@ -204,6 +231,14 @@ export interface CardActionConsumerCallbacks {
 export interface AgentRuntime {
   check(): Promise<{ provider: string; model: string; auth: string | null }>
   run(request: RuntimeRequest): Promise<RuntimeResult>
+}
+
+/** Thrown by gateways that cannot back the run_lark_cli tool (e.g. OpenApiGateway). */
+export class RunLarkCliUnsupportedError extends Error {
+  constructor(message = "run_lark_cli is not available in this deployment") {
+    super(message)
+    this.name = "RunLarkCliUnsupportedError"
+  }
 }
 
 export interface MemoryBackedRuntime extends AgentRuntime {

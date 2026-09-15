@@ -151,12 +151,12 @@ export class MemoryWarmer {
       lookbackDays: this.options.config.memoryWarmLookbackDays,
     })
     if (this.options.config.memoryWarmInitialDelayMs <= 0) {
-      this.initialRun = this.trigger().then(() => {
+      this.initialRun = this.trigger(true).then(() => {
         this.scheduleNext()
       })
     } else {
       const initial = setTimeout(() => {
-        this.initialRun = this.trigger().then(() => {
+        this.initialRun = this.trigger(true).then(() => {
           this.scheduleNext()
         })
       }, this.options.config.memoryWarmInitialDelayMs)
@@ -191,8 +191,8 @@ export class MemoryWarmer {
     this.timer.unref()
   }
 
-  private trigger(): Promise<void> {
-    this.runInFlight = this.warmOnce()
+  private trigger(initial = false): Promise<void> {
+    this.runInFlight = this.warmOnce(initial)
       .catch((error) => {
         this.failures += 1
         this.lastResult = "failed"
@@ -205,9 +205,12 @@ export class MemoryWarmer {
     return this.runInFlight
   }
 
-  async warmOnce(): Promise<void> {
+  async warmOnce(initial = false): Promise<void> {
     const now = new Date()
-    const start = new Date(now.getTime() - this.options.config.memoryWarmLookbackDays * 24 * 60 * 60 * 1000)
+    const lookback = initial
+      ? this.options.config.memoryWarmInitialLookbackDays
+      : this.options.config.memoryWarmLookbackDays
+    const start = new Date(now.getTime() - lookback * 24 * 60 * 60 * 1000)
     this.runs += 1
     this.lastRunAt = Date.now()
     const pendingBefore = this.options.semantic.pendingMessageCount()
@@ -228,6 +231,8 @@ export class MemoryWarmer {
       this.options.onWarmedOnce?.()
     }
     logger.info("memory_warmer_run_completed", {
+      initial,
+      lookbackDays: lookback,
       status: result.status,
       coverage: result.coverage.status,
       observedMessages: result.evidence.observedMessages,
