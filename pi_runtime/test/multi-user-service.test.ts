@@ -314,3 +314,102 @@ test("user outside the allowlist is silently ignored", async (t) => {
   assert.equal(gateway.cardSends.length, 0)
   assert.equal(gateway.replies.filter((reply) => reply.stage === "final").length, 0)
 })
+
+test("multi-user mode starts the card action consumer and queues welcome-card quick tasks", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "multi-user-svc-"))
+  t.after(async () => {
+    await rm(stateDir, { recursive: true, force: true })
+  })
+  const config = multiUserConfig(stateDir)
+  const gateway = new RecordingGateway()
+  const tokenStore = new TenantTokenStore(join(stateDir, "tokens.json"), { appId: "cli_test", appSecret: "s" })
+  await tokenStore.load()
+  await tokenStore.upsert(tokenRecord("ou_alice", "甲"))
+  const tokenManager = new UserTokenManager({
+    app: { appId: "cli_test", appSecret: "s" },
+    store: { get: (id) => tokenStore.get(id), upsert: (r) => tokenStore.upsert(r) },
+  })
+  const seen: Array<{ owner: string | null; text: string }> = []
+  const service = new MultiUserService({
+    config,
+    gateway: gateway as never,
+    tokenStore,
+    tokenManager,
+    runtime: historySpyRuntime(seen) as never,
+    sessionProvider: { sessionFor: () => null as never } as OwnerMemorySessionProvider,
+    buildAuthorizeUrl: (owner, redirect, state) => `https://accounts.feishu.cn/authorize?state=${state}&for=${owner}&redirect=${encodeURIComponent(redirect)}`,
+    setActiveOwner: (owner) => gateway.setActiveOwner(owner),
+  })
+  await service.start()
+
+  // Regression: the card action consumer must start even though multi-user
+  // mode never sets a single startup owner.
+  assert.equal(gateway.cardConsumers.length, 1)
+
+  // A welcome-card quick-task button click from an authorized user is queued
+  // and the final reply lands on the card message.
+  const done = new Promise<void>((resolve) => {
+    const timer = setInterval(async () => {
+      const ledger = await readFile(join(stateDir, "usage-ledger.jsonl"), "utf8").catch(() => "")
+      if (ledger.includes('"status":"success"')) {
+        clearInterval(timer)
+        resolve()
+      }
+    }, 10)
+  })
+  gateway.cardConsumers[0]?.onEvent({
+    event_id: "card_evt_1",
+    operator_id: "ou_alice",
+    message_id: "om_welcome_card",
+    chat_id: "oc_alice",
+    action_tag: "button",
+    action_value: { action: "quick_task", task: "生成今天的工作简报" },
+  })
+  await done
+  await service.stop()
+
+  assert.deepEqual(seen, [{ owner: "ou_alice", text: "生成今天的工作简报" }])
+  assert.equal(gateway.activeOwner, "ou_alice")
+  const final = gateway.replies.find((reply) => reply.stage === "final")
+  assert.ok(final)
+  assert.equal(final.messageId, "om_welcome_card")
+})
+
+test("card actions from unauthorized operators are ignored", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "multi-user-svc-"))
+  t.after(async () => {
+    await rm(stateDir, { recursive: true, force: true })
+  })
+  const config = multiUserConfig(stateDir)
+  const gateway = new RecordingGateway()
+  const tokenStore = new TenantTokenStore(join(stateDir, "tokens.json"), { appId: "cli_test", appSecret: "s" })
+  await tokenStore.load()
+  await tokenStore.upsert(tokenRecord("ou_alice", "甲"))
+  const tokenManager = new UserTokenManager({
+    app: { appId: "cli_test", appSecret: "s" },
+    store: { get: (id) => tokenStore.get(id), upsert: (r) => tokenStore.upsert(r) },
+  })
+  const seen: Array<{ owner: string | null; text: string }> = []
+  const service = new MultiUserService({
+    config,
+    gateway: gateway as never,
+    tokenStore,
+    tokenManager,
+    runtime: historySpyRuntime(seen) as never,
+    sessionProvider: { sessionFor: () => null as never } as OwnerMemorySessionProvider,
+    buildAuthorizeUrl: (owner, redirect, state) => `https://accounts.feishu.cn/authorize?state=${state}&for=${owner}&redirect=${encodeURIComponent(redirect)}`,
+    setActiveOwner: (owner) => gateway.setActiveOwner(owner),
+  })
+  await service.start()
+  gateway.cardConsumers[0]?.onEvent({
+    event_id: "card_evt_2",
+    operator_id: "ou_bob",
+    message_id: "om_welcome_card",
+    chat_id: "oc_bob",
+    action_tag: "button",
+    action_value: { action: "quick_task", task: "生成今天的工作简报" },
+  })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  await service.stop()
+  assert.equal(seen.length, 0)
+})

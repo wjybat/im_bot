@@ -49,6 +49,7 @@ export function createMemoryTools(
   memory: OfficeMemory,
   semantic: SemanticMemory,
   onUsage?: (usage: RuntimeUsage) => void,
+  ownerOpenId?: string | null,
 ): AgentTool[] {
   const preparer = new ContextPreparer({
     config,
@@ -56,6 +57,7 @@ export function createMemoryTools(
     memory,
     semantic,
     prioritizeRequestWindow: true,
+    ...(ownerOpenId ? { ownerOpenId } : {}),
     ...(onUsage ? { onUsage } : {}),
   })
 

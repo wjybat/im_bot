@@ -9,6 +9,7 @@ import { createModelRuntime } from "../src/agent/model.js"
 import { OwnerMemoryRouter } from "../src/tenant/memory-router.js"
 import { TenantTokenStore, buildOAuthAuthorizeUrl } from "../src/tenant/token-store.js"
 import { quickTaskPromptFromCardAction } from "../src/agent/welcome-card.js"
+import { adaptCardActionEvent } from "../src/tenant/openapi-gateway.js"
 
 test("tenant token store persists per-user records atomically", async (t) => {
   const stateDir = await mkdtemp(join(tmpdir(), "token-store-"))
@@ -126,6 +127,47 @@ test("card quick-task prompt whitelist still applies in multi-user mode", () => 
       { action_tag: "button", action_value: { action: "quick_task", task: "伪造的提示词" } },
       tasks,
     ),
+    null,
+  )
+})
+
+test("card action adapter resolves v2 card.action.trigger payloads", () => {
+  // v2 schema delivered by the SDK WS event dispatcher: ids under context,
+  // operator object, action object with the callback value.
+  const v2 = adaptCardActionEvent({
+    event_id: "evt_1",
+    operator: { open_id: "ou_alice" },
+    context: { open_message_id: "om_card", open_chat_id: "oc_alice" },
+    action: { tag: "button", value: { action: "quick_task", task: "生成今天的工作简报" } },
+  })
+  assert.ok(v2)
+  assert.equal(v2.operator_id, "ou_alice")
+  assert.equal(v2.message_id, "om_card")
+  assert.equal(v2.chat_id, "oc_alice")
+  assert.equal(v2.action_tag, "button")
+  assert.deepEqual(v2.action_value, { action: "quick_task", task: "生成今天的工作简报" })
+  assert.equal(
+    quickTaskPromptFromCardAction(v2, [{ label: "今天的工作简报", prompt: "生成今天的工作简报" }]),
+    "生成今天的工作简报",
+  )
+
+  // Flat legacy shape still resolves.
+  const flat = adaptCardActionEvent({
+    event_id: "evt_2",
+    operator_id: "ou_bob",
+    message_id: "om_card",
+    chat_id: "oc_bob",
+    action_tag: "button",
+    action_value: { action: "quick_task", task: "生成今天的工作简报" },
+  })
+  assert.ok(flat)
+  assert.equal(flat.operator_id, "ou_bob")
+  assert.equal(flat.message_id, "om_card")
+
+  // Missing ids or operator yield null (event dropped, not misrouted).
+  assert.equal(adaptCardActionEvent({ operator: { open_id: "ou_x" }, action: { tag: "button" } }), null)
+  assert.equal(
+    adaptCardActionEvent({ context: { open_message_id: "om_c", open_chat_id: "oc_c" }, action: {} }),
     null,
   )
 })

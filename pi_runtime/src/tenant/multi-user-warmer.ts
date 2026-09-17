@@ -11,8 +11,6 @@ export interface MultiUserWarmerOptions {
   router: OwnerMemoryRouter
   /** Resolves which owners currently hold valid user tokens (the warm set). */
   warmOwners: () => Array<{ ownerOpenId: string; ownerName: string | null }>
-  /** Pins the gateway's active owner before each per-owner warm pass. */
-  gatewaySetActiveOwner: (ownerOpenId: string) => void
   onUsage?: (usage: RuntimeUsage) => void
   /** Invoked once after the first completed warm run of this process. */
   onWarmedOnce?: () => void
@@ -43,6 +41,7 @@ export class MultiUserWarmer {
         gateway: this.options.gateway,
         memory,
         semantic,
+        ownerOpenId,
         maxChunks: this.options.config.memoryWarmMaxChunks,
         ...(this.options.onUsage ? { onUsage: this.options.onUsage } : {}),
       })
@@ -115,10 +114,11 @@ export class MultiUserWarmer {
     const lookback = initial
       ? this.options.config.memoryWarmInitialLookbackDays
       : this.options.config.memoryWarmLookbackDays
-    // Pin the gateway's active owner per sequential warm pass.
+    // Each warm pass reads with its owner's token explicitly; no shared
+    // mutable gateway state is relied upon, so warm runs and live message
+    // processing cannot cross owner scopes.
     for (const owner of owners) {
       const session = this.options.router.sessionFor(owner.ownerOpenId)
-      this.options.gatewaySetActiveOwner(owner.ownerOpenId)
       const now = new Date()
       const start = new Date(now.getTime() - lookback * 24 * 60 * 60 * 1000)
       const toSecondPrecision = (value: number): string =>

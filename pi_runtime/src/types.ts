@@ -41,6 +41,7 @@ export interface RuntimeConfig {
   runtimeTimeoutMs: number
   runtimeStreamRetries: number
   runtimeStreamRetryDelayMs: number
+  runtimeUpstreamRetries: number
   toolTimeoutMs: number
   authVerifyIntervalMs: number
   authVerifyMessageAttempts: number
@@ -189,22 +190,28 @@ export interface LarkGateway {
     end: string
     chatType?: "p2p" | "group"
     pageLimit: number
+    /** Owner whose user token backs this read; multi-tenant callers must pass it explicitly. */
+    ownerOpenId?: string
   }, signal?: AbortSignal): Promise<unknown>
-  getMessagesByIds(messageIds: string[], signal?: AbortSignal): Promise<unknown>
+  getMessagesByIds(messageIds: string[], signal?: AbortSignal, ownerOpenId?: string): Promise<unknown>
   listChatMessages(input: {
     chatId: string
     start?: string
     end?: string
     order: "asc" | "desc"
     pageSize: number
+    /** Owner whose user token backs this read; multi-tenant callers must pass it explicitly. */
+    ownerOpenId?: string
   }, signal?: AbortSignal): Promise<unknown>
   listThreadMessages(input: {
     threadId: string
     order: "asc" | "desc"
     pageSize: number
+    /** Owner whose user token backs this read; multi-tenant callers must pass it explicitly. */
+    ownerOpenId?: string
   }, signal?: AbortSignal): Promise<unknown>
-  getAgenda(input: { start: string; end: string }, signal?: AbortSignal): Promise<unknown>
-  getIncompleteTasks(input: { pageLimit: number }, signal?: AbortSignal): Promise<unknown>
+  getAgenda(input: { start: string; end: string; ownerOpenId?: string }, signal?: AbortSignal): Promise<unknown>
+  getIncompleteTasks(input: { pageLimit: number; ownerOpenId?: string }, signal?: AbortSignal): Promise<unknown>
   runReadOnlyCli(args: string[], signal?: AbortSignal): Promise<{ stdout: string }>
   replyToMessage(messageId: string, markdown: string, stage?: "processing" | "final" | "error" | "overloaded"): Promise<void>
   sendCardMessage(input: { userOpenId: string; card: unknown }): Promise<{ messageId: string }>

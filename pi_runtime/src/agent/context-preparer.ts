@@ -1,3 +1,4 @@
+import { logger } from "../infra/logger.js"
 import type { OfficeMemory, SemanticMemory } from "../memory/index.js"
 import type { MemoryIngestResult } from "../memory/types.js"
 import type { LarkGateway, RuntimeConfig, RuntimeUsage } from "../types.js"
@@ -61,6 +62,25 @@ function payloadMayHaveMore(value: unknown): boolean {
   return visit(value, 0)
 }
 
+/** Collects chat ids and sender ids from a lark payload for name backfill. */
+function collectChatAndSenderIds(payload: unknown, chatIds: Set<string>, senderIds: Set<string>): void {
+  const visit = (current: unknown, depth: number): void => {
+    if (depth > 4 || typeof current !== "object" || current === null) return
+    if (Array.isArray(current)) {
+      for (const item of current) visit(item, depth + 1)
+      return
+    }
+    const row = current as Record<string, unknown>
+    const chat = row.chat_id ?? row.chatId
+    if (typeof chat === "string" && chat.startsWith("oc_")) chatIds.add(chat)
+    const sender = row.sender as Record<string, unknown> | undefined
+    const senderId = sender?.open_id ?? row.sender_id ?? row.from_id
+    if (typeof senderId === "string" && senderId.startsWith("ou_")) senderIds.add(senderId)
+    for (const key of ["data", "result", "messages"]) visit(row[key], depth + 1)
+  }
+  visit(payload, 0)
+}
+
 export function splitWindow(window: TimeWindow, minWindowMs: number): [TimeWindow, TimeWindow] | null {
   const { startAt, endAt } = validateRange(window.start, window.end)
   if (endAt - startAt < minWindowMs) return null
@@ -108,6 +128,8 @@ export interface ContextPreparerOptions {
   gateway: LarkGateway
   memory: OfficeMemory
   semantic: SemanticMemory
+  /** Owner whose user token backs gateway reads; null defers to the gateway's pinned owner. */
+  ownerOpenId?: string | null
   onUsage?: (usage: RuntimeUsage) => void
   maxChunks?: number
   /** When true, semantic extraction prioritizes chunks inside the requested range. */
@@ -156,6 +178,8 @@ export class ContextPreparer {
     let windowsRead = 0
     let errors = 0
     const attempted = new Set<string>()
+    const chatIds = new Set<string>()
+    const senderIds = new Set<string>()
     const queue: TimeWindow[] =
       input.freshness === "cached_ok" && initialCoverage.complete
         ? []
@@ -184,9 +208,11 @@ export class ContextPreparer {
             end: window.end,
             ...(input.chatType ? { chatType: input.chatType } : {}),
             pageLimit: this.options.config.maxMessagePages,
+            ...(this.options.ownerOpenId ? { ownerOpenId: this.options.ownerOpenId } : {}),
           },
           signal,
         )
+        collectChatAndSenderIds(payload, chatIds, senderIds)
         const ingested = this.options.memory.ingestLarkPayload(payload, {
           source: "lark-sync",
           resource: "chat.message",
@@ -207,7 +233,9 @@ export class ContextPreparer {
             const hydrated = await this.options.gateway.getMessagesByIds(
               unresolved.slice(offset, offset + 50),
               signal,
+              this.options.ownerOpenId ?? undefined,
             )
+            collectChatAndSenderIds(hydrated, chatIds, senderIds)
             const hydratedIngest = this.options.memory.ingestLarkPayload(hydrated, {
               source: "lark-sync",
               resource: "chat.message",
@@ -262,6 +290,7 @@ export class ContextPreparer {
     }
 
     for (const window of queue) await syncWindow(window)
+    await this.backfillDisplayNames(chatIds, senderIds)
     const finalCoverage = this.options.memory.coverageFor(input.start, input.end, query, input.chatType)
     let failedChunks = 0
     let factsCreated = 0
@@ -315,6 +344,44 @@ export class ContextPreparer {
         rejectedMessages: Object.values(aggregate.rejected).reduce((sum, count) => sum + (count ?? 0), 0),
       },
       errors,
+    }
+  }
+
+  /**
+   * Resolves chat titles and sender display names for freshly synced rows
+   * (the message search/list APIs return ids only) and backfills them into
+   * memory. Best effort: failures are logged and skipped, never fatal.
+   */
+  private async backfillDisplayNames(chatIds: ReadonlySet<string>, senderIds: ReadonlySet<string>): Promise<void> {
+    if (chatIds.size === 0 && senderIds.size === 0) return
+    const resolver = this.options.gateway as LarkGateway & {
+      resolveDisplayNames?: (input: {
+        chatIds: readonly string[]
+        senderIds: readonly string[]
+        ownerOpenId?: string
+      }) => Promise<{ chatTitles: Map<string, string>; senderNames: Map<string, string> }>
+    }
+    if (typeof resolver.resolveDisplayNames !== "function") return
+    try {
+      const names = await resolver.resolveDisplayNames({
+        chatIds: [...chatIds],
+        senderIds: [...senderIds],
+        ...(this.options.ownerOpenId ? { ownerOpenId: this.options.ownerOpenId } : {}),
+      })
+      const backfilled = this.options.memory.backfillDisplayNames({
+        chatTitles: names.chatTitles,
+        senderNames: names.senderNames,
+      })
+      if (backfilled.conversations > 0 || backfilled.messages > 0) {
+        logger.info("memory_display_names_backfilled", {
+          conversations: backfilled.conversations,
+          messages: backfilled.messages,
+        })
+      }
+    } catch (error) {
+      logger.warn("memory_display_names_backfill_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      })
     }
   }
 }

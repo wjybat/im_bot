@@ -1,6 +1,6 @@
 import * as Lark from "@larksuiteoapi/node-sdk"
 import { logger } from "../infra/logger.js"
-import { truncateText } from "../infra/safety.js"
+import { replyIdempotencyKey, truncateText } from "../infra/safety.js"
 import {
   RunLarkCliUnsupportedError,
   type CardActionConsumerCallbacks,
@@ -69,6 +69,8 @@ export class OpenApiGateway implements LarkGateway {
   private readonly options: OpenApiGatewayOptions
   private wsMessage: Lark.WSClient | null = null
   private wsCard: Lark.WSClient | null = null
+  private messageConsumerCallbacks: MessageConsumerCallbacks | null = null
+  private cardConsumerCallbacks: CardActionConsumerCallbacks | null = null
   private activeOwnerOpenId = ""
 
   constructor(options: OpenApiGatewayOptions) {
@@ -132,10 +134,10 @@ export class OpenApiGateway implements LarkGateway {
   // ------------------------------------------------------------ read APIs
 
   async searchMessages(
-    input: { query: string; start: string; end: string; chatType?: "p2p" | "group"; pageLimit: number },
+    input: { query: string; start: string; end: string; chatType?: "p2p" | "group"; pageLimit: number; ownerOpenId?: string },
     signal?: AbortSignal,
   ): Promise<unknown> {
-    const token = await this.requireUserToken(this.requireActiveOwner())
+    const token = await this.requireUserToken(this.resolveReadOwner(input.ownerOpenId))
     const startMs = Date.parse(input.start)
     const endMs = Date.parse(input.end)
     const hits: WireMessage[] = []
@@ -206,10 +208,10 @@ export class OpenApiGateway implements LarkGateway {
     return { has_more: hasMore, messages }
   }
 
-  async getMessagesByIds(messageIds: string[], signal?: AbortSignal): Promise<unknown> {
+  async getMessagesByIds(messageIds: string[], signal?: AbortSignal, ownerOpenId?: string): Promise<unknown> {
     const unique = [...new Set(messageIds)].filter((id) => id.trim() !== "").slice(0, 50)
     if (unique.length === 0) return { messages: [] }
-    const token = await this.requireUserToken(this.requireActiveOwner())
+    const token = await this.requireUserToken(this.resolveReadOwner(ownerOpenId))
     const messages = await this.fetchMessages(unique, token, signal)
     return { has_more: false, messages }
   }
@@ -273,10 +275,10 @@ export class OpenApiGateway implements LarkGateway {
   }
 
   async listChatMessages(
-    input: { chatId: string; start?: string; end?: string; order: "asc" | "desc"; pageSize: number },
+    input: { chatId: string; start?: string; end?: string; order: "asc" | "desc"; pageSize: number; ownerOpenId?: string },
     signal?: AbortSignal,
   ): Promise<unknown> {
-    const token = await this.requireUserToken(this.requireActiveOwner())
+    const token = await this.requireUserToken(this.resolveReadOwner(input.ownerOpenId))
     const response = await this.client.im.v1.message.list(
       {
         params: {
@@ -302,10 +304,10 @@ export class OpenApiGateway implements LarkGateway {
   }
 
   async listThreadMessages(
-    input: { threadId: string; order: "asc" | "desc"; pageSize: number },
+    input: { threadId: string; order: "asc" | "desc"; pageSize: number; ownerOpenId?: string },
     signal?: AbortSignal,
   ): Promise<unknown> {
-    const token = await this.requireUserToken(this.requireActiveOwner())
+    const token = await this.requireUserToken(this.resolveReadOwner(input.ownerOpenId))
     const response = await this.client.im.v1.message.list(
       {
         params: {
@@ -324,8 +326,8 @@ export class OpenApiGateway implements LarkGateway {
     return { has_more: response.data?.has_more ?? false, messages }
   }
 
-  async getAgenda(input: { start: string; end: string }, signal?: AbortSignal): Promise<unknown> {
-    const token = await this.requireUserToken(this.requireActiveOwner())
+  async getAgenda(input: { start: string; end: string; ownerOpenId?: string }, signal?: AbortSignal): Promise<unknown> {
+    const token = await this.requireUserToken(this.resolveReadOwner(input.ownerOpenId))
     const response = await this.client.calendar.v4.calendarEvent.list(
       {
         params: {
@@ -341,8 +343,8 @@ export class OpenApiGateway implements LarkGateway {
     return { events: response?.data?.items ?? [] }
   }
 
-  async getIncompleteTasks(input: { pageLimit: number }, signal?: AbortSignal): Promise<unknown> {
-    const token = await this.requireUserToken(this.requireActiveOwner())
+  async getIncompleteTasks(input: { pageLimit: number; ownerOpenId?: string }, signal?: AbortSignal): Promise<unknown> {
+    const token = await this.requireUserToken(this.resolveReadOwner(input.ownerOpenId))
     const tasks: unknown[] = []
     let pageToken: string | undefined
     for (let page = 0; page < Math.min(input.pageLimit, 10); page += 1) {
@@ -366,6 +368,63 @@ export class OpenApiGateway implements LarkGateway {
 
   async runReadOnlyCli(): Promise<{ stdout: string }> {
     throw new RunLarkCliUnsupportedError()
+  }
+
+  /**
+   * Resolves display names for ingestion backfill: chat titles via
+   * im.chats.get, sender names via im.chats.members (paged, user token).
+   * Missing entries are simply absent from the returned maps.
+   */
+  async resolveDisplayNames(input: {
+    chatIds: readonly string[]
+    senderIds: readonly string[]
+    ownerOpenId?: string
+  }): Promise<{ chatTitles: Map<string, string>; senderNames: Map<string, string> }> {
+    const chatTitles = new Map<string, string>()
+    const senderNames = new Map<string, string>()
+    const owner = this.resolveReadOwner(input.ownerOpenId)
+    for (const chatId of [...new Set(input.chatIds)]) {
+      if (!chatId.startsWith("oc_")) continue
+      const response = await this.client.im.v1.chat.get(
+        { path: { chat_id: chatId } },
+        Lark.withUserAccessToken(await this.requireUserToken(owner)),
+      ).catch(() => null)
+      if (response?.code === 0 && response.data?.name) chatTitles.set(chatId, response.data.name)
+    }
+    const unresolved = new Set(
+      [...new Set(input.senderIds)].filter((id) => id.startsWith("ou_") && !senderNames.has(id)),
+    )
+    if (unresolved.size > 0) {
+      for (const chatId of [...new Set(input.chatIds)]) {
+        if (!chatId.startsWith("oc_") || unresolved.size === 0) continue
+        let pageToken: string | undefined
+        for (let page = 0; page < 5; page += 1) {
+          const response = await this.client.im.v1.chatMembers.get(
+            {
+              params: {
+                member_id_type: "open_id",
+                page_size: 100,
+                ...(pageToken ? { page_token: pageToken } : {}),
+              },
+              path: { chat_id: chatId },
+            },
+            Lark.withUserAccessToken(await this.requireUserToken(owner)),
+          ).catch(() => null)
+          if (response?.code !== 0) break
+          for (const member of response.data?.items ?? []) {
+            const id = member.member_id ?? ""
+            const name = member.name ?? ""
+            if (id !== "" && name !== "" && unresolved.has(id)) {
+              senderNames.set(id, name)
+              unresolved.delete(id)
+            }
+          }
+          if (!response.data?.has_more || response.data?.page_token === undefined) break
+          pageToken = response.data.page_token
+        }
+      }
+    }
+    return { chatTitles, senderNames }
   }
 
   // ------------------------------------------------------------ write APIs
@@ -419,30 +478,22 @@ export class OpenApiGateway implements LarkGateway {
   }
 
   private replyKey(messageId: string, stage: string): string {
-    return `piimbot-${Buffer.from(`${messageId}:${stage}`).toString("base64url").slice(0, 40)}`
+    return replyIdempotencyKey(messageId, stage)
   }
 
   // ------------------------------------------------------------ consumers
 
   startMessageConsumer(callbacks: MessageConsumerCallbacks): MessageConsumer {
-    return this.startWsConsumer("im.message.receive_v1", callbacks, (data) => {
-      const event = this.adaptMessageEvent(data)
-      if (event !== null) callbacks.onEvent(event)
-    })
+    this.messageConsumerCallbacks = callbacks
+    return this.startWsConsumer(callbacks)
   }
 
   startCardActionConsumer(callbacks: CardActionConsumerCallbacks): MessageConsumer {
-    return this.startWsConsumer("card.action.trigger", callbacks, (data) => {
-      const event = this.adaptCardActionEvent(data)
-      if (event !== null) callbacks.onEvent(event)
-    })
+    this.cardConsumerCallbacks = callbacks
+    return this.startWsConsumer(callbacks)
   }
 
-  private startWsConsumer(
-    eventKey: "im.message.receive_v1" | "card.action.trigger",
-    callbacks: MessageConsumerCallbacks | CardActionConsumerCallbacks,
-    handle: (data: unknown) => void,
-  ): MessageConsumer {
+  private startWsConsumer(callbacks: MessageConsumerCallbacks | CardActionConsumerCallbacks): MessageConsumer {
     let settled = false
     let readyResolve: () => void = () => undefined
     let readyReject: (error: unknown) => void = () => undefined
@@ -466,7 +517,6 @@ export class OpenApiGateway implements LarkGateway {
         logger.error(
           "openapi_ws_error",
           error instanceof Error ? error : new Error(String(error)),
-          { eventKey },
         )
         if (!settled) {
           settled = true
@@ -476,21 +526,41 @@ export class OpenApiGateway implements LarkGateway {
       onReconnecting: () => callbacks.onDiagnostic?.("exited"),
       onReconnected: () => callbacks.onDiagnostic?.("connected"),
     })
-    const registration: EventRegistration = {
-      [eventKey]: async (data: unknown) => {
+    const dispatch = (key: "im.message.receive_v1" | "card.action.trigger", data: unknown): Promise<void> => {
+      const run = (async () => {
+        if (key === "im.message.receive_v1") {
+          const event = this.adaptMessageEvent(data)
+          if (event !== null && this.messageConsumerCallbacks !== null) this.messageConsumerCallbacks.onEvent(event)
+        } else {
+          const event = this.adaptCardActionEvent(data)
+          if (event !== null && this.cardConsumerCallbacks !== null) this.cardConsumerCallbacks.onEvent(event)
+        }
+      })()
+      return run
+    }
+    const wrap = (key: "im.message.receive_v1" | "card.action.trigger"): NonNullable<EventRegistration["im.message.receive_v1"]> => {
+      return async (data: unknown) => {
         try {
           await Promise.race([
-            Promise.resolve(handle(data)),
+            dispatch(key, data),
             new Promise((resolve) => setTimeout(resolve, EVENT_HANDLER_TIMEOUT_MS)),
           ])
         } catch (error) {
           logger.error(
             "openapi_event_handler_failed",
             error instanceof Error ? error : new Error(String(error)),
-            { eventKey },
+            { eventKey: key },
           )
         }
-      },
+      }
+    }
+    // Feishu load-balances events across all of an app's live long
+    // connections, so every connection registers handlers for both event
+    // types; a consumer that has not started yet simply drops its events
+    // (callbacks null), same as a dedicated single-type connection would.
+    const registration: EventRegistration = {
+      "im.message.receive_v1": wrap("im.message.receive_v1"),
+      "card.action.trigger": wrap("card.action.trigger"),
     }
     void ws
       .start({ eventDispatcher: new Lark.EventDispatcher({}).register(registration) })
@@ -500,7 +570,7 @@ export class OpenApiGateway implements LarkGateway {
           readyReject(error instanceof Error ? error : new Error(String(error)))
         }
       })
-    if (eventKey === "im.message.receive_v1") this.wsMessage = ws
+    if (callbacks === this.messageConsumerCallbacks) this.wsMessage = ws
     else this.wsCard = ws
     return {
       ready,
@@ -537,22 +607,7 @@ export class OpenApiGateway implements LarkGateway {
 
   /** Adapts a card.action.trigger event into the flat shape service.ts expects. */
   private adaptCardActionEvent(data: unknown): CardActionEvent | null {
-    const event = data as {
-      event_id?: unknown
-      operator_id?: unknown
-      message_id?: unknown
-      chat_id?: unknown
-      action_tag?: unknown
-      action_value?: unknown
-    }
-    return {
-      event_id: event.event_id,
-      operator_id: event.operator_id,
-      message_id: event.message_id,
-      chat_id: event.chat_id,
-      action_tag: event.action_tag,
-      action_value: event.action_value,
-    }
+    return adaptCardActionEvent(data)
   }
 
   // ------------------------------------------------------------ helpers
@@ -562,11 +617,15 @@ export class OpenApiGateway implements LarkGateway {
     this.activeOwnerOpenId = ownerOpenId
   }
 
-  private requireActiveOwner(): string {
-    if (this.activeOwnerOpenId === "") {
-      throw new Error("no active owner set; call setActiveOwner before owner-scoped reads")
-    }
-    return this.activeOwnerOpenId
+  /**
+   * Resolves the owner for an owner-scoped read: an explicit per-call owner
+   * wins (multi-tenant concurrent safety), the pinned active owner is the
+   * single-owner fallback.
+   */
+  private resolveReadOwner(explicit: string | undefined): string {
+    if (explicit !== undefined && explicit !== "") return explicit
+    if (this.activeOwnerOpenId !== "") return this.activeOwnerOpenId
+    throw new Error("no owner set; pass ownerOpenId or call setActiveOwner before owner-scoped reads")
   }
 
   private async requireUserToken(ownerOpenId: string): Promise<string> {
@@ -585,5 +644,65 @@ export class OpenApiGateway implements LarkGateway {
     }
     const parsed = Date.parse(value)
     return Number.isFinite(parsed) ? parsed : fallback
+  }
+}
+
+/**
+ * Adapts a raw card.action.trigger event (v2 schema: ids nested under
+ * `context`, operator under `operator`, action under `action`) into the flat
+ * shape service.ts expects. Falls back to flat fields and returns null when
+ * message, chat, or operator cannot be resolved.
+ */
+export function adaptCardActionEvent(data: unknown): CardActionEvent | null {
+  const event = data as {
+    event_id?: unknown
+    operator_id?: { open_id?: unknown } | unknown
+    operator?: { open_id?: unknown } | undefined
+    message_id?: unknown
+    chat_id?: unknown
+    context?: { open_message_id?: unknown; open_chat_id?: unknown }
+    open_message_id?: unknown
+    open_chat_id?: unknown
+    action?: { tag?: unknown; value?: unknown }
+    action_tag?: unknown
+    action_value?: unknown
+  }
+  const message =
+    typeof event.message_id === "string"
+      ? event.message_id
+      : typeof event.context?.open_message_id === "string"
+        ? event.context.open_message_id
+        : typeof event.open_message_id === "string"
+          ? event.open_message_id
+          : undefined
+  const chat =
+    typeof event.chat_id === "string"
+      ? event.chat_id
+      : typeof event.context?.open_chat_id === "string"
+        ? event.context.open_chat_id
+        : typeof event.open_chat_id === "string"
+          ? event.open_chat_id
+          : undefined
+  const operator =
+    typeof event.operator_id === "string"
+      ? event.operator_id
+      : typeof (event.operator_id as { open_id?: unknown } | null)?.open_id === "string"
+        ? (event.operator_id as { open_id: string }).open_id
+        : typeof event.operator?.open_id === "string"
+          ? event.operator.open_id
+          : undefined
+  if (message === undefined || chat === undefined || operator === undefined) return null
+  return {
+    event_id: event.event_id,
+    operator_id: operator,
+    message_id: message,
+    chat_id: chat,
+    action_tag:
+      event.action_tag !== undefined
+        ? event.action_tag
+        : event.action?.tag !== undefined
+          ? event.action.tag
+          : "button",
+    action_value: event.action_value !== undefined ? event.action_value : event.action?.value,
   }
 }

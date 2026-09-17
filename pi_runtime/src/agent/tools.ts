@@ -15,6 +15,7 @@ export function createRuntimeTools(
   memory: OfficeMemory,
   semantic: SemanticMemory,
   onUsage?: (usage: RuntimeUsage) => void,
+  ownerOpenId?: string | null,
 ): AgentTool[] {
   const larkReadCache = new Map<
     string,
@@ -102,7 +103,7 @@ export function createRuntimeTools(
   return [
     skills.loadTool,
     skills.readFileTool,
-    ...createMemoryTools(config, gateway, memory, semantic, onUsage),
+    ...createMemoryTools(config, gateway, memory, semantic, onUsage, ownerOpenId),
     runLarkCli,
   ]
 }

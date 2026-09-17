@@ -121,6 +121,7 @@ export function loadConfig(): RuntimeConfig {
     runtimeTimeoutMs: integer("IM_BOT_PI_TIMEOUT_MS", 600_000, 10_000, 1_800_000),
     runtimeStreamRetries: integer("IM_BOT_PI_STREAM_RETRIES", 2, 0, 5),
     runtimeStreamRetryDelayMs: integer("IM_BOT_PI_STREAM_RETRY_DELAY_MS", 2_000, 250, 60_000),
+    runtimeUpstreamRetries: integer("IM_BOT_PI_UPSTREAM_RETRIES", 3, 0, 10),
     toolTimeoutMs: integer("IM_BOT_PI_TOOL_TIMEOUT_MS", 120_000, 5_000, 600_000),
     authVerifyIntervalMs: integer("IM_BOT_PI_AUTH_VERIFY_INTERVAL_MS", 600_000, 60_000, 3_600_000),
     authVerifyMessageAttempts: integer("IM_BOT_PI_AUTH_VERIFY_MESSAGE_ATTEMPTS", 3, 1, 10),

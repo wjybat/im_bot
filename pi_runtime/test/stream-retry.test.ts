@@ -122,3 +122,131 @@ test("runtime does not retry non-stream failures", async (t) => {
   )
   assert.equal(calls, 1)
 })
+
+function upstreamErrorStream(models: Models, failures: number, status: number): StreamFn {
+  let calls = 0
+  const fn = (model: Model<Api>, context: Context, options: Parameters<StreamFn>[2]) => {
+    calls += 1
+    if (calls <= failures) {
+      return Promise.reject(
+        new Error(
+          `OpenAI API error (${status}): 503 data: {"error":{"message":"模型服务异常","type":"upstream_error","code":${status}}}`,
+        ),
+      )
+    }
+    return models.streamSimple(model, context, options)
+  }
+  return fn as unknown as StreamFn
+}
+
+test("runtime retries upstream 5xx model service errors and succeeds", async (t) => {
+  const config = { ...loadConfig(), runtimeUpstreamRetries: 3, runtimeStreamRetryDelayMs: 1, maxTurns: 3 }
+  const faux = fauxProvider({ provider: "faux-upstream-retry" })
+  const models = createModels()
+  models.setProvider(faux.provider)
+  const model = faux.getModel()
+  if (!model) throw new Error("faux model unavailable")
+  faux.setResponses([fauxAssistantMessage([fauxText("服务恢复后的回答")])])
+  const gateway = new LarkCliGateway(config)
+  const memory = new OfficeMemory({ path: ":memory:", ownerExternalId: "ou_owner" })
+  t.after(() => memory.close())
+  const semantic = createTestSemantic(memory, config)
+  const skills = await loadRuntimeSkills(config.projectRoot, config.skillsDir)
+  const runtime = new PiAgentRuntime({
+    config,
+    gateway,
+    models,
+    model,
+    streamFn: upstreamErrorStream(models, 3, 503) as never,
+    skills,
+    memory,
+    semantic,
+  })
+  const result = await runtime.run({
+    text: "随便问点什么",
+    requestId: "upstream-retry-test",
+    sessionId: "upstream-retry-test",
+  })
+  assert.match(result.reply, /服务恢复后的回答/)
+})
+
+test("runtime gives up after exhausting upstream retries", async (t) => {
+  const config = { ...loadConfig(), runtimeUpstreamRetries: 2, runtimeStreamRetryDelayMs: 1, maxTurns: 3 }
+  const faux = fauxProvider({ provider: "faux-upstream-exhaust" })
+  const models = createModels()
+  models.setProvider(faux.provider)
+  const model = faux.getModel()
+  if (!model) throw new Error("faux model unavailable")
+  let calls = 0
+  const streamFn = ((): StreamFn => {
+    const fn = () => {
+      calls += 1
+      return Promise.reject(new Error("OpenAI API error (503): 503 模型服务异常"))
+    }
+    return fn as unknown as StreamFn
+  })()
+  const memory = new OfficeMemory({ path: ":memory:", ownerExternalId: "ou_owner" })
+  t.after(() => memory.close())
+  const semantic = createTestSemantic(memory, config)
+  const skills = await loadRuntimeSkills(config.projectRoot, config.skillsDir)
+  const runtime = new PiAgentRuntime({
+    config,
+    gateway: null as never,
+    models,
+    model,
+    streamFn: streamFn as never,
+    skills,
+    memory,
+    semantic,
+  })
+  await assert.rejects(
+    runtime.run({
+      text: "随便问点什么",
+      requestId: "upstream-retry-exhaust",
+      sessionId: "upstream-retry-exhaust",
+    }),
+    /OpenAI API error \(503\)/,
+  )
+  // Initial call + configured retries.
+  assert.equal(calls, 3)
+})
+
+test("runtime does not retry non-retryable upstream statuses like 401", async (t) => {
+  const config = { ...loadConfig(), runtimeUpstreamRetries: 3, runtimeStreamRetryDelayMs: 1, maxTurns: 3 }
+  const faux = fauxProvider({ provider: "faux-upstream-401" })
+  const models = createModels()
+  models.setProvider(faux.provider)
+  const model = faux.getModel()
+  if (!model) throw new Error("faux model unavailable")
+  let calls = 0
+  const streamFn = ((): StreamFn => {
+    const fn = () => {
+      calls += 1
+      return Promise.reject(new Error("OpenAI API error (401): Invalid token"))
+    }
+    return fn as unknown as StreamFn
+  })()
+  const memory = new OfficeMemory({ path: ":memory:", ownerExternalId: "ou_owner" })
+  t.after(() => memory.close())
+  const semantic = createTestSemantic(memory, config)
+  const skills = await loadRuntimeSkills(config.projectRoot, config.skillsDir)
+  const runtime = new PiAgentRuntime({
+    config,
+    gateway: null as never,
+    models,
+    model,
+    streamFn: streamFn as never,
+    skills,
+    memory,
+    semantic,
+  })
+  await assert.rejects(
+    runtime.run({
+      text: "随便问点什么",
+      requestId: "upstream-401",
+      sessionId: "upstream-401",
+    }),
+    /Invalid token/,
+  )
+  assert.equal(calls, 1)
+})

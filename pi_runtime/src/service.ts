@@ -203,9 +203,10 @@ export class PiBotService {
       logger.info("message_duplicate_ignored", { message: hash })
       return
     }
+    const replyTarget = accepted.replyToMessageId ?? accepted.messageId
     if (this.pending.length >= this.config.maxQueue) {
       logger.warn("message_queue_full", { message: hash, queued: this.pending.length })
-      void this.replyAndMark(accepted.messageId, overloadedReply, "overloaded")
+      void this.replyAndMark(replyTarget, overloadedReply, "overloaded")
       return
     }
     this.inFlight.add(accepted.messageId)
@@ -216,14 +217,14 @@ export class PiBotService {
       sourceCreateTimePresent: accepted.createTime !== null,
     })
     void this.gateway
-      .replyToMessage(accepted.messageId, this.config.processingReply, "processing")
+      .replyToMessage(replyTarget, this.config.processingReply, "processing")
       .then(() => logger.info("processing_reply_sent", { message: hash }))
       .catch((error) => logger.error("processing_reply_failed", error, { message: hash }))
     void this.drain()
   }
 
   protected async startCardActionConsumer(): Promise<void> {
-    if (this.stopping || !this.owner) return
+    if (this.stopping) return
     const consumer = this.gateway.startCardActionConsumer({
       onEvent: (event) => this.acceptCardAction(event),
       onMalformedEvent: (error) => logger.error("card_action_malformed_event", error),
@@ -320,12 +321,10 @@ export class PiBotService {
       logger.info("card_action_ignored", { event: hashIdentifier(eventId) })
       return
     }
-    if (this.pending.length >= this.config.maxQueue) {
-      logger.warn("card_action_queue_full", { event: hashIdentifier(eventId), queued: this.pending.length })
-      return
-    }
-    this.inFlight.add(dedupKey)
-    this.pending.push({
+    logger.info("card_action_task_queued", { event: hashIdentifier(eventId), queued: this.pending.length })
+    // Route through enqueueAccepted so multi-tenant authorization gates and
+    // queue-pressure handling apply to card actions too.
+    this.enqueueAccepted({
       messageId: dedupKey,
       content: prompt,
       messageType: "text",
@@ -335,8 +334,6 @@ export class PiBotService {
       replyToMessageId: messageId,
       ...(operatorId !== null ? { senderOpenId: operatorId } : {}),
     })
-    logger.info("card_action_task_queued", { event: hashIdentifier(eventId), queued: this.pending.length })
-    void this.drain()
   }
 
   private async onCardConsumerExit(code: number | null, signal: NodeJS.Signals | null): Promise<void> {

@@ -226,7 +226,6 @@ async function runMultiUserListener(config: ReturnType<typeof loadConfig>): Prom
     router,
     warmOwners: () =>
       tokenStore.list().map((record) => ({ ownerOpenId: record.ownerOpenId, ownerName: record.ownerName })),
-    gatewaySetActiveOwner: (ownerOpenId) => gateway.setActiveOwner(ownerOpenId),
     onWarmedOnce: () => undefined,
   })
   const stop = async (signal: NodeJS.Signals): Promise<void> => {

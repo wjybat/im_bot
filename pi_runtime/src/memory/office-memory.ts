@@ -492,6 +492,53 @@ export class OfficeMemory {
     )
   }
 
+  /**
+   * Backfills display names resolved after ingestion: chat titles by chat
+   * external id, sender names by sender external id. Only touches rows that
+   * currently lack a name, returns how many were updated. FTS rows are
+   * refreshed so sender/conversation tokens match.
+   */
+  backfillDisplayNames(input: {
+    chatTitles?: ReadonlyMap<string, string>
+    senderNames?: ReadonlyMap<string, string>
+  }): { conversations: number; messages: number } {
+    this.assertOpen()
+    const now = Date.now()
+    let conversations = 0
+    let messages = 0
+    for (const [externalId, title] of input.chatTitles ?? []) {
+      const trimmed = title.trim()
+      if (trimmed === "") continue
+      const result = this.db.prepare(
+        `UPDATE memory_conversations
+         SET title = ?, updated_at = ?
+         WHERE owner_key = ? AND external_id = ? AND (title IS NULL OR title = '')`,
+      ).run(trimmed, now, this.ownerKey, externalId)
+      conversations += numeric(result.changes)
+    }
+    for (const [externalId, name] of input.senderNames ?? []) {
+      const trimmed = name.trim()
+      if (trimmed === "") continue
+      const rows = this.db.prepare(
+        `SELECT m.id FROM memory_messages m
+         JOIN memory_conversations c ON c.id = m.conversation_id
+         WHERE m.owner_key = ? AND m.sender_external_id = ?
+           AND (m.sender_display_name IS NULL OR m.sender_display_name = '')
+           AND m.learning_eligible = 1`,
+      ).all(this.ownerKey, externalId) as Array<{ id: string }>
+      if (rows.length === 0) continue
+      this.db.prepare(
+        `UPDATE memory_messages SET sender_display_name = ?, updated_local_at = ?
+         WHERE id IN (${rows.map(() => "?").join(",")})`,
+      ).run(trimmed, now, ...rows.map((row) => row.id))
+      messages += rows.length
+      for (const item of rows) {
+        this.reindexMessage(item.id)
+      }
+    }
+    return { conversations, messages }
+  }
+
   coverageFor(
     start: string,
     end: string,

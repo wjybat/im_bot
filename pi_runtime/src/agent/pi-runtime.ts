@@ -80,6 +80,19 @@ export class PiRuntimeExecutionError extends Error {
   }
 }
 
+/**
+ * Extracts a retryable upstream HTTP status from a provider error message
+ * (e.g. "OpenAI API error (503): ..." or "Mistral API error (529): ...").
+ * Returns null for absent or non-retryable statuses.
+ */
+export function upstreamHttpStatusOf(message: string): number | null {
+  const match = /API error \((\d{3})\)/.exec(message)
+  if (match === null) return null
+  const status = Number.parseInt(match[1]!, 10)
+  if (status === 408 || status === 409 || status === 429 || status >= 500) return status
+  return null
+}
+
 function finalReply(messages: readonly AgentMessage[]): string {
   const final = [...messages].reverse().find((message) => message.role === "assistant")
   if (!final || final.role !== "assistant") throw new Error("Pi runtime returned no assistant message")
@@ -151,6 +164,7 @@ export class PiAgentRuntime implements MemoryBackedRuntime {
       session.memory,
       session.semantic,
       (usage) => addRuntimeUsage(auxiliaryUsage, usage),
+      request.ownerOpenId ?? null,
     )
     const allowedTools = new Set(tools.map((tool) => tool.name))
     let turns = 0
@@ -219,21 +233,31 @@ export class PiAgentRuntime implements MemoryBackedRuntime {
     }
 
     try {
-      let attempt = 0
+      let streamAttempts = 0
+      let upstreamAttempts = 0
       // eslint-disable-next-line no-constant-condition
       while (true) {
         try {
           return await executeAgent()
         } catch (error) {
-          attempt += 1
-          if (!this.isRetryableStreamError(error) || attempt > this.config.runtimeStreamRetries) {
-            throw error
+          const message = error instanceof Error ? error.message : String(error)
+          const isUpstream = error instanceof Error && upstreamHttpStatusOf(message) !== null
+          if (isUpstream) {
+            upstreamAttempts += 1
+            if (upstreamAttempts > this.config.runtimeUpstreamRetries) throw error
+          } else {
+            streamAttempts += 1
+            if (!this.isRetryableStreamError(error) || streamAttempts > this.config.runtimeStreamRetries) {
+              throw error
+            }
           }
-          logger.warn("runtime_stream_retry_scheduled", {
+          const attempt = isUpstream ? upstreamAttempts : streamAttempts
+          const retries = isUpstream ? this.config.runtimeUpstreamRetries : this.config.runtimeStreamRetries
+          logger.warn(isUpstream ? "runtime_upstream_retry_scheduled" : "runtime_stream_retry_scheduled", {
             attempt,
-            retries: this.config.runtimeStreamRetries,
+            retries,
             delayMs: this.config.runtimeStreamRetryDelayMs,
-            error: error instanceof Error ? error.message : String(error),
+            error: message,
           })
           await new Promise((resolve) => setTimeout(resolve, this.config.runtimeStreamRetryDelayMs * attempt))
         }
@@ -252,19 +276,23 @@ export class PiAgentRuntime implements MemoryBackedRuntime {
 
   /**
    * Transient upstream stream failures worth a full retry: the provider cut
-   * the stream before a terminal event, or the connection dropped mid-turn.
+   * the stream before a terminal event, the connection dropped mid-turn, or
+   * the upstream model service returned a retryable HTTP status (5xx/408/429).
    * Prompt-cache reuse keeps the retry cost close to the failed attempt.
    */
   private isRetryableStreamError(error: unknown): boolean {
     if (!(error instanceof Error)) return false
     const message = error.message
-    return (
+    if (
       message.includes("stream ended before a terminal response event") ||
       message.includes("connection closed before response") ||
       message.includes("aborted by peer") ||
       message.includes("ECONNRESET") ||
       message.includes("socket hang up")
-    )
+    ) {
+      return true
+    }
+    return upstreamHttpStatusOf(message) !== null
   }
 }
 
