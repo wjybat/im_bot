@@ -1,3 +1,5 @@
+node_modules/
+dist/
 .env
 .env.*
 !.env.example
@@ -20,7 +22,5 @@ logs/*
 !logs/.gitkeep
 var/*
 !var/.gitkeep
-runtime/*
-!runtime/.gitkeep
-!runtime/AGENTS.md
 *.tmp
+bot.log

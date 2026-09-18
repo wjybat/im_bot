@@ -1,18 +1,39 @@
 {
-  "name": "feishu-codex-im-bot",
+  "name": "feishu-pi-agent-runtime",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "scripts": {
-    "start": "node src/main.mjs",
-    "check": "node src/main.mjs --check",
-    "codex:smoke": "node src/main.mjs --codex-smoke",
-    "test": "node --test",
-    "service:install": "node scripts/launchd.mjs install",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:real": "node --import tsx --test test/real-agent.integration.ts",
+    "test:real:memory": "node --import tsx --test test/real-memory.integration.ts",
+    "verify": "npm run typecheck && npm test && npm run build",
+    "demo": "tsx src/main.ts demo",
+    "smoke:lark": "tsx src/main.ts smoke-lark",
+    "auth:openai-codex": "tsx src/auth-login.ts openai-codex",
+    "auth:set-dmall-key": "tsx src/set-api-key.ts dmall-ai",
+    "models": "tsx src/main.ts models",
+    "skills:sync": "node scripts/sync-lark-skills.mjs",
+    "check": "tsx src/main.ts check",
+    "once": "tsx src/main.ts once",
+    "listen": "tsx src/main.ts listen",
+    "service:install": "npm run build && node scripts/launchd.mjs install",
     "service:uninstall": "node scripts/launchd.mjs uninstall",
     "service:status": "node scripts/launchd.mjs status"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.84.3",
+    "@earendil-works/pi-ai": "0.84.3",
+    "@larksuiteoapi/node-sdk": "^1.73.3"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.19",
+    "tsx": "4.22.1",
+    "typescript": "5.9.3"
   }
 }

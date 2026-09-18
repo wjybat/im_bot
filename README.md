@@ -1,120 +1,87 @@
-# Feishu Codex IM Bot
+# Feishu Pi Agent Runtime
 
-> 迁移状态：旧 Codex launchd 服务已停止并保留作对照。新的 TypeScript + Pi Agent Runtime 位于 [`pi_runtime/`](pi_runtime/README.md)，当前已使用真实 `gpt-5.6-luna` 并由独立 launchd 服务监听飞书消息。
+个人飞书办公助手 Runtime。以 `@earendil-works/pi-agent-core` 驱动真实模型自主选择 Skill、参考资源和工具；宿主只负责身份校验、消息队列、记忆管线和回复发送，不做关键词路由。当前接入飞书，默认使用 DMall AI Router 的 `gpt-5.6-luna`。
 
-一个单用户、P2P-only 的飞书个人助手机器人宿主：`lark-cli` 负责实时收信和 Bot 回复，`codex exec` 负责理解问题，并通过已安装的飞书 Skills/CLI 读取当前授权用户的数据。
+## 能做什么
 
-## 身份模型
+- **即时问答**：基于本地办公记忆（消息、事实、轻量图谱）回答消息/待办/决策类问题，必要时实时查飞书校验
+- **每日工作简报**：`daily-work-brief` 工作流综合消息、日历、任务、审批、会议生成昨日小结/今日规划/本周关注
+- **自主多域检索**：27 个 `lark-*` 集成 Skill 覆盖 IM、日历、任务、邮件、文档、云盘、审批、会议、妙记、OKR、表格、知识库等域
+- **持续学习**：后台固定时刻预热同步消息并抽取事实，构建知识图谱；多轮对话连续性（追问可用）
+- **成本可观测**：每条消息聚合 Token/成本台账
 
-| 环节 | 身份 | 原因 |
-|---|---|---|
-| 接收 `im.message.receive_v1` | Bot | 事件属于飞书应用机器人 |
-| 查询“我的待办/日历/消息/文档” | User | 个人资源必须使用当前用户的 `user_access_token` |
-| 回复当前私聊消息 | Bot | 回复以应用机器人名义发出 |
-
-启动时会从 `lark-cli auth status --json --verify` 解析当前授权用户的 `open_id`。只有这个用户发给机器人的 P2P 消息会进入 Codex；群聊、其他用户和 Bot 消息全部丢弃。
-
-## 数据流
-
-```mermaid
-flowchart LR
-    A["用户私聊飞书应用机器人"] --> B["lark-cli event consume"]
-    B --> C["P2P + owner 身份闸"]
-    C --> D["message_id 去重与串行队列"]
-    D --> E["codex exec --ephemeral"]
-    E --> F["Agent 自主选择只读 lark-* Skill"]
-    F --> G["lark-cli --as user 读取个人数据"]
-    G --> E
-    E --> H["宿主以 Bot 身份回复原消息"]
-```
-
-## 当前安全边界
-
-- 仅当前已授权用户；仅 P2P；仅用户发出的消息。
-- Codex 使用 `workspace-write` sandbox，但可写范围只限 `im_bot/runtime`；之所以不用
-  `read-only`，是因为本机 Codex 的只读沙箱会禁用 `lark-cli` 所需的网络访问。
-- Codex 只允许读取，不允许发送消息或修改飞书数据。
-- 用户 token 的验证和自动刷新只由宿主执行：启动时、每 10 分钟及每次 Codex
-  调用前各有串行闸；Codex 内禁止执行 login/logout/带 `--verify` 的 auth 命令。
-- 唯一外部写入是宿主对当前消息的 Bot 回复。
-- 处理成功后把 `message_id` 写入本地 `var/state.json`，权限为 `0600`。
-- 回复使用稳定 idempotency key，进程重启或事件重投不会重复回复。
-- 日志只记录 ID 的哈希前缀，不记录消息正文、原始 ID 或 Token。
-- 宿主不按关键词把请求固定路由到任务或日历。Codex 根据语义自主选择信息源；未明确
-  限定为“飞书任务/任务中心”的“待办”，默认从今天截至当前的私聊和群聊消息中识别
-  指派、待回复问题、承诺跟进、期限和待决事项，原生任务与日历只作为可选补充。
-- `runtime/AGENTS.md` 位于 Codex 实际工作目录，确保每次非交互运行都加载同一套身份、
-  只读边界和自主规划规则；关键规则也会随每次请求动态注入。
-
-这仍是单用户 MVP。多用户版本必须为每个飞书用户建立独立 OAuth/token 映射，不能让其他用户复用宿主机器上的个人 user token。
-
-## 前置条件
-
-1. `lark-cli` 已配置应用，Bot 和用户身份均为 ready。
-2. 飞书后台已订阅 `im.message.receive_v1`，私聊权限至少包含 `im:message.p2p_msg:readonly`。
-3. Bot 回复权限包含 `im:message:send_as_bot`。
-4. 本机 `codex` 已登录；`codex exec` 可用。
-5. 全局已安装所需的 `lark-*` Skills。
-6. Node.js 20+。
-
-## 本地运行
+## 快速开始
 
 ```bash
-cd im_bot
-npm run test
-npm run check
-npm run codex:smoke
-npm start
+cd im_bot/pi_runtime
+npm install --ignore-scripts
+npm run verify        # typecheck + 单测 + build
+npm run demo          # 离线 Faux 演示
+npm run smoke:lark    # 真实 lark-cli 只读链路冒烟
+npm run test:real     # 真实模型 + 真实飞书只读验收
+npm run test:real:memory  # 内存库跑通完整记忆链路
 ```
 
-`npm run codex:smoke` 会让 Codex 在只读模式下检查当前飞书用户授权，只输出有效/无效，不发送飞书消息。
+## 配置与运行
 
-## macOS 常驻运行
+项目启动时通过 `process.loadEnvFile()` 自动读取根目录 `.env`（shell 环境优先，`.env` 只补充）。`.env` 被 Git 忽略，只提交 `.env.example`。完整配置清单见 `.env.example` 与 [`docs/runtime.md`](docs/runtime.md#配置速查)。
+
+### 接入模型
+
+- **DMall AI Router（当前）**：`IM_BOT_PI_PROVIDER=dmall-ai` + `npm run auth:set-dmall-key`，密钥写入 `var/pi-auth/auth.json`（0600）
+- **OpenAI Codex OAuth**：`IM_BOT_PI_PROVIDER=openai-codex` + `npm run auth:openai-codex`
+- **API Key**：`openai` / `anthropic` + 对应 `*_API_KEY`
+
+不要把任何密钥写进仓库、plist 或命令行参数。
+
+### 运行方式
 
 ```bash
-cd im_bot
-npm run service:install
+npm run check                          # 只验连通，不回复
+npm run once -- '今天有什么要处理的'    # 真实读取，回答只打印本地
+npm run listen                         # 前台监听并回复
+npm run service:install                # macOS launchd 常驻
 npm run service:status
-```
-
-日志：
-
-```text
-im_bot/logs/launchd.out.log
-im_bot/logs/launchd.err.log
-```
-
-卸载：
-
-```bash
 npm run service:uninstall
 ```
 
-launchd 配置会复制到 `~/Library/LaunchAgents/com.local.im-data-collection.im-bot.plist`。配置中只有程序路径和非敏感运行参数，不保存飞书或 OpenAI 密钥。
+服务标签 `com.local.im-data-collection.pi-bot`。只接受当前授权 owner 发给 Bot 的 P2P 文本/富文本消息；launchd 安装时会校验配置（含预热 schedule 格式），坏配置拒绝安装。
 
-## 配置
+## 架构索引
 
-复制 `.env.example` 中需要的变量到启动环境。当前实现不自动读取 `.env`，避免在没有依赖的情况下自行解释 shell 格式；本地调试可以在终端 `export`，launchd 安装器会写入必要的可执行文件路径。
+```text
+src/main.ts               入口：demo/smoke/check/models/once/listen 子命令
+src/service.ts            消息闸、队列、鉴权重试、对话历史、回复编排
+src/adapters/lark-cli.ts  飞书 CLI、User/Bot 身份、事件流、只读风控
+src/agent/pi-runtime.ts   Pi Agent 生命周期、turn/timeout/usage 聚合
+src/agent/tools.ts        Skill 加载与受控工具的组合入口
+src/agent/memory-tools.ts 五个记忆工具（status/prepare/search×2/evidence）
+src/agent/context-preparer.ts  覆盖计算、缺窗同步、水合、单次事实更新
+src/agent/memory-warmer.ts     固定时刻后台预热调度
+src/memory/               SQLite 记忆库：规范化、切片、抽取、图、FTS、RRF
+src/infra/                状态去重、成本台账、安全脱敏、日志
+runtime/system.md         Runtime 身份、安全和自主规划提示词
+runtime/skills/           版本化 Skills（integrations/workflows/custom）
+test/                     单测 + 真实链路集成测试
+```
 
-常用变量：
+**详细设计文档**：
 
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `IM_BOT_CODEX_SANDBOX` | `workspace-write` | 只允许写 runtime 目录并开启网络；不要扩大到 danger-full-access |
-| `IM_BOT_CODEX_MODEL` | 空 | 空表示沿用 Codex 当前配置 |
-| `IM_BOT_CODEX_TIMEOUT_MS` | `600000` | 单次处理超时（10 分钟） |
-| `IM_BOT_AUTH_VERIFY_INTERVAL_MS` | `600000` | 宿主串行验证/刷新用户 token 的周期 |
-| `IM_BOT_ALLOWED_USER_OPEN_ID` | 当前授权用户 | 可显式钉住 owner；不要提交到仓库 |
-| `IM_BOT_MAX_QUEUE` | `20` | 最大待处理消息数 |
-| `IM_BOT_REPLY_ON_ERROR` | `true` | Codex 失败时是否回复通用错误消息 |
-| `IM_BOT_ALLOW_USER_WRITES` | `false` | 当前版本必须保持 false |
+- [`docs/runtime.md`](docs/runtime.md) —— 消息生命周期、对话历史、鉴权、launchd、配置速查
+- [`docs/memory.md`](docs/memory.md) —— 记忆分层、上下文准备、事实抽取、混合检索、防污染、后台预热
 
-## 生产化待办
+## 安全边界
 
-- 用户确认协议与安全的外部写操作白名单。
-- 多用户 OAuth/token 隔离。
-- 结构化审计、指标、告警和成本台账。
-- 更可靠的持久队列与失败重放。
-- 附件、卡片和语音消息处理。
-- 将 Codex 可调用的飞书能力收敛到显式只读工具代理，而不是通用 shell。
-- Linux systemd / Docker 部署。
+- Pi 没有通用 Bash、文件编辑或飞书写工具。`run_lark_cli` 执行前读命令声明的 Risk，仅放行 `Risk: read`；写命令、认证变更、`--yes` 一律拒绝
+- 唯一远端写入路径是宿主的 `replyToMessage()`；模型不能自发消息
+- 防污染硬闸在数据库写入层执行：助手控制私聊、Agent 自产内容、空内容不进入可检索记忆（详见 [`docs/memory.md`](docs/memory.md#防污染guards)）
+- 最终回复强制脱敏内部标识（app/open/chat/message ID、token、内存句柄）
+
+## 当前限制
+
+- Mac 睡眠时长连接暂停，尚未实现唤醒后补拉 checkpoint
+- 记忆已覆盖消息/事实/图谱与后台预热；日历/任务/邮件/文档暂不走记忆，每次实时查
+- 尚未实现流式增量回答、失败分类卡片、重试/死信队列
+- 多进程部署需要跨进程文件锁或密钥服务（当前单进程假设）
+
+Pi 源码固定信息见 [`THIRD_PARTY.md`](THIRD_PARTY.md)。

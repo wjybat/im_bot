@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process"
 import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
+import { homedir } from "node:os"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { loadConfig } from "../src/config.mjs"
 
-const label = "com.local.im-data-collection.im-bot"
+const label = "com.local.im-data-collection.pi-bot"
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const template = resolve(root, "launchd", `${label}.plist.template`)
-const targetDir = resolve(process.env.HOME, "Library", "LaunchAgents")
+const userHome = homedir()
+const targetDir = resolve(userHome, "Library", "LaunchAgents")
 const target = resolve(targetDir, `${label}.plist`)
 const domain = `gui/${process.getuid()}`
 
@@ -16,7 +17,7 @@ function run(command, args, { allowFailure = false } = {}) {
   const result = spawnSync(command, args, { encoding: "utf8" })
   if (!allowFailure && (result.error || result.status !== 0)) {
     const detail = (result.stderr || result.error?.message || "unknown error").trim()
-    throw new Error(`${command} ${args.join(" ")} failed: ${detail}`)
+    throw new Error(`${command} failed: ${detail}`)
   }
   return result
 }
@@ -36,39 +37,56 @@ function xml(value) {
 }
 
 function render() {
-  const config = loadConfig()
-  const node = process.execPath || executable("node")
-  const larkCli = config.larkCli
-  const codexCli = config.codexCli
+  const node = process.execPath
+  const larkCli = existsSync(resolve(userHome, ".npm-global", "bin", "lark-cli"))
+    ? resolve(userHome, ".npm-global", "bin", "lark-cli")
+    : executable("lark-cli")
   const path = Array.from(
-    new Set(
-      [dirname(node), dirname(larkCli), dirname(codexCli), ...(process.env.PATH || "").split(":"), "/usr/bin", "/bin"].filter(
-        Boolean,
-      ),
-    ),
-  ).join(":")
+    new Set([dirname(node), dirname(larkCli), ...(process.env.PATH || "").split(":"), "/usr/bin", "/bin"]),
+  )
+    .filter(Boolean)
+    .join(":")
   return readFileSync(template, "utf8")
     .replaceAll("__ROOT__", xml(root))
-    .replaceAll("__HOME__", xml(process.env.HOME))
+    .replaceAll("__HOME__", xml(userHome))
     .replaceAll("__NODE__", xml(node))
     .replaceAll("__LARK_CLI__", xml(larkCli))
-    .replaceAll("__CODEX_CLI__", xml(codexCli))
     .replaceAll("__PATH__", xml(path))
 }
 
 function waitForUnload() {
   for (let attempt = 0; attempt < 40; attempt += 1) {
-    const current = run("/bin/launchctl", ["print", `${domain}/${label}`], {
-      allowFailure: true,
-    })
+    const current = run("/bin/launchctl", ["print", `${domain}/${label}`], { allowFailure: true })
     if (current.status !== 0) return
     run("/bin/sleep", ["0.25"])
   }
   throw new Error(`${label} did not finish unloading within 10 seconds`)
 }
 
+function validateConfig() {
+  const envFile = resolve(root, ".env")
+  const env = {}
+  if (existsSync(envFile)) {
+    for (const line of readFileSync(envFile, "utf8").split(/\r?\n/)) {
+      const matched = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line.trim())
+      if (matched) env[matched[1]] = matched[2]
+    }
+  }
+  const schedule = (env.IM_BOT_PI_MEMORY_WARM_SCHEDULE ?? "07:30,12:30,23:00").trim()
+  if (schedule === "") return
+  for (const entry of schedule.split(",").map((item) => item.trim()).filter(Boolean)) {
+    if (!/^([01]?\d|2[0-3]):[0-5]\d$/.test(entry)) {
+      throw new Error(`IM_BOT_PI_MEMORY_WARM_SCHEDULE contains invalid HH:MM entry: "${entry}"`)
+    }
+  }
+}
+
 function install() {
   if (process.platform !== "darwin") throw new Error("launchd installation is only supported on macOS")
+  if (!existsSync(resolve(root, "var", "pi-auth", "auth.json"))) {
+    throw new Error("Pi model credential is missing; configure it before installing the service")
+  }
+  validateConfig()
   mkdirSync(resolve(root, "logs"), { recursive: true, mode: 0o700 })
   mkdirSync(resolve(root, "var"), { recursive: true, mode: 0o700 })
   mkdirSync(targetDir, { recursive: true, mode: 0o700 })
