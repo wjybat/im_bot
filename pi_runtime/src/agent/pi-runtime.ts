@@ -93,6 +93,31 @@ export function upstreamHttpStatusOf(message: string): number | null {
   return null
 }
 
+/**
+ * Known transient overload phrases that arrive without an HTTP status
+ * (stream-level errors surfaced as plain text, e.g. "Our servers are
+ * currently overloaded. Please try again later."). Matching is
+ * case-insensitive substring containment.
+ */
+const TRANSIENT_OVERLOAD_PHRASES: readonly string[] = [
+  "servers are currently overloaded",
+  "currently overloaded",
+  "please try again later",
+  "overloaded_error",
+  "server_error",
+  "capacity",
+  "temporarily unavailable",
+  "model service unavailable",
+  "upstream_error",
+  "try your request again",
+]
+
+/** True when an error message carries a transient-overload phrase without a status code. */
+export function isTransientOverloadMessage(message: string): boolean {
+  const normalized = message.toLowerCase()
+  return TRANSIENT_OVERLOAD_PHRASES.some((phrase) => normalized.includes(phrase))
+}
+
 function finalReply(messages: readonly AgentMessage[]): string {
   const final = [...messages].reverse().find((message) => message.role === "assistant")
   if (!final || final.role !== "assistant") throw new Error("Pi runtime returned no assistant message")
@@ -241,7 +266,9 @@ export class PiAgentRuntime implements MemoryBackedRuntime {
           return await executeAgent()
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
-          const isUpstream = error instanceof Error && upstreamHttpStatusOf(message) !== null
+          const isUpstream =
+            error instanceof Error &&
+            (upstreamHttpStatusOf(message) !== null || isTransientOverloadMessage(message))
           if (isUpstream) {
             upstreamAttempts += 1
             if (upstreamAttempts > this.config.runtimeUpstreamRetries) throw error

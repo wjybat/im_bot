@@ -221,21 +221,33 @@ export class OpenApiGateway implements LarkGateway {
     userToken: string,
     signal?: AbortSignal,
   ): Promise<WireMessage[]> {
+    // Hydration runs concurrently (bounded) — each message is an independent
+    // GET; serial fetching made window sync quadratic in wall time.
+    const concurrency = Math.min(10, Math.max(1, messageIds.length))
+    const queue = [...messageIds]
+    const workers: Promise<void>[] = []
     const results: WireMessage[] = []
-    for (const messageId of messageIds) {
-      const response = await this.client.im.v1.message.get(
-        { path: { message_id: messageId }, params: { user_id_type: "open_id" } },
-        { ...(signal ? { signal } : {}), ...Lark.withUserAccessToken(userToken) },
-      ).catch((error) => {
-        logger.warn("openapi_message_get_failed", { messageId, error: String(error).slice(0, 200) })
-        return null
-      })
-      if (response === null || response.code !== 0) continue
-      const item = (response.data?.items ?? [])[0] as RawMessageResource | undefined
-      if (item === undefined) continue
-      const wire = this.toWireMessage(item)
-      if (wire !== null) results.push(wire)
+    for (let worker = 0; worker < concurrency; worker += 1) {
+      workers.push((async () => {
+        for (;;) {
+          const messageId = queue.shift()
+          if (messageId === undefined) return
+          const response = await this.client.im.v1.message.get(
+            { path: { message_id: messageId }, params: { user_id_type: "open_id" } },
+            { ...(signal ? { signal } : {}), ...Lark.withUserAccessToken(userToken) },
+          ).catch((error) => {
+            logger.warn("openapi_message_get_failed", { messageId, error: String(error).slice(0, 200) })
+            return null
+          })
+          if (response === null || response.code !== 0) continue
+          const item = (response.data?.items ?? [])[0] as RawMessageResource | undefined
+          if (item === undefined) continue
+          const wire = this.toWireMessage(item)
+          if (wire !== null) results.push(wire)
+        }
+      })())
     }
+    await Promise.all(workers)
     return results
   }
 
@@ -383,20 +395,24 @@ export class OpenApiGateway implements LarkGateway {
     const chatTitles = new Map<string, string>()
     const senderNames = new Map<string, string>()
     const owner = this.resolveReadOwner(input.ownerOpenId)
-    for (const chatId of [...new Set(input.chatIds)]) {
-      if (!chatId.startsWith("oc_")) continue
-      const response = await this.client.im.v1.chat.get(
-        { path: { chat_id: chatId } },
-        Lark.withUserAccessToken(await this.requireUserToken(owner)),
-      ).catch(() => null)
-      if (response?.code === 0 && response.data?.name) chatTitles.set(chatId, response.data.name)
-    }
+    const chatIds = [...new Set(input.chatIds)].filter((chatId) => chatId.startsWith("oc_"))
+    const token = await this.requireUserToken(owner)
+
+    // Resolve chat titles concurrently; per-chat member pagination runs in
+    // parallel too, sharing one unresolved set (last writer wins is fine —
+    // a member id resolves to the same name in every chat).
     const unresolved = new Set(
       [...new Set(input.senderIds)].filter((id) => id.startsWith("ou_") && !senderNames.has(id)),
     )
-    if (unresolved.size > 0) {
-      for (const chatId of [...new Set(input.chatIds)]) {
-        if (!chatId.startsWith("oc_") || unresolved.size === 0) continue
+    await Promise.all(
+      chatIds.map(async (chatId) => {
+        const title = await this.client.im.v1.chat.get(
+          { path: { chat_id: chatId } },
+          Lark.withUserAccessToken(token),
+        ).catch(() => null)
+        if (title?.code === 0 && title.data?.name) chatTitles.set(chatId, title.data.name)
+
+        if (unresolved.size === 0) return
         let pageToken: string | undefined
         for (let page = 0; page < 5; page += 1) {
           const response = await this.client.im.v1.chatMembers.get(
@@ -408,7 +424,7 @@ export class OpenApiGateway implements LarkGateway {
               },
               path: { chat_id: chatId },
             },
-            Lark.withUserAccessToken(await this.requireUserToken(owner)),
+            Lark.withUserAccessToken(token),
           ).catch(() => null)
           if (response?.code !== 0) break
           for (const member of response.data?.items ?? []) {
@@ -422,8 +438,8 @@ export class OpenApiGateway implements LarkGateway {
           if (!response.data?.has_more || response.data?.page_token === undefined) break
           pageToken = response.data.page_token
         }
-      }
-    }
+      }),
+    )
     return { chatTitles, senderNames }
   }
 

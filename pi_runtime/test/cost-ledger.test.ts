@@ -9,7 +9,7 @@ import { UsageLedger } from "../src/infra/usage-ledger.js"
 
 test("configured DMall model carries official reference pricing and long-context tier", () => {
   const config = loadConfig()
-  const model = createConfiguredModels(config).getModel("dmall-ai", "gpt-5.6-luna")
+  const model = createConfiguredModels(config).getModel("dmall-ai", config.model ?? "")
   assert.ok(model)
   assert.deepEqual(model.cost, {
     input: 0.2,
