@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { rm, stat } from "node:fs/promises"
 import { loadConfig } from "./config.js"
 import { LarkCliGateway } from "./adapters/lark-cli.js"
 import { createConfiguredModels, createModelRuntime } from "./agent/model.js"
@@ -20,7 +21,7 @@ import { loadRuntimeSkills } from "./agent/skills.js"
 
 function usage(): never {
   throw new Error(
-    "usage: tsx src/main.ts <demo [prompt] | smoke-lark | models | check | once <prompt> | listen>",
+    "usage: tsx src/main.ts <demo [prompt] | smoke-lark | models | check | once <prompt> | listen | reset [--yes]>",
   )
 }
 
@@ -116,6 +117,47 @@ function listModels(): void {
       null,
       2,
     )}\n`,
+  )
+}
+
+async function runReset(confirmed: boolean): Promise<void> {
+  const config = loadConfig()
+  const candidates = [config.memoryFile, `${config.memoryFile}-wal`, `${config.memoryFile}-shm`]
+  const targets: { path: string; size: number }[] = []
+  for (const path of candidates) {
+    try {
+      targets.push({ path, size: (await stat(path)).size })
+    } catch {
+      // Missing sidecar files are expected after a clean shutdown.
+    }
+  }
+  if (targets.length === 0) {
+    process.stdout.write(
+      `${JSON.stringify({ ok: true, deleted: [], message: "memory database not found; nothing to reset" }, null, 2)}\n`,
+    )
+    return
+  }
+  if (!confirmed) {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          ok: false,
+          action: "reset-memory",
+          targets,
+          warning:
+            "this deletes all pulled chat records and extracted graph data; stop the listen service first",
+          hint: "re-run with --yes to confirm",
+        },
+        null,
+        2,
+      )}\n`,
+    )
+    process.exitCode = 1
+    return
+  }
+  for (const target of targets) await rm(target.path, { force: true })
+  process.stdout.write(
+    `${JSON.stringify({ ok: true, deleted: targets.map((target) => target.path) }, null, 2)}\n`,
   )
 }
 
@@ -257,6 +299,8 @@ async function main(): Promise<void> {
     await runOnce(prompt)
   } else if (command === "listen") {
     await runListener()
+  } else if (command === "reset") {
+    await runReset(args.includes("--yes"))
   } else {
     usage()
   }

@@ -40,6 +40,8 @@ npm run test:real:memory  # 内存库跑通完整记忆链路
 npm run check                          # 只验连通，不回复
 npm run once -- '今天有什么要处理的'    # 真实读取，回答只打印本地
 npm run listen                         # 前台监听并回复
+npm run reset                          # 预览要清空的记忆库文件
+npm run reset -- --yes                 # 清空记忆库（聊天记录 + 图谱，不可恢复；先停 listen）
 npm run service:install                # macOS launchd 常驻
 npm run service:status
 npm run service:uninstall
