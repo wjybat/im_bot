@@ -42,6 +42,8 @@ npm run once -- '今天有什么要处理的'    # 真实读取，回答只打�
 npm run listen                         # 前台监听并回复
 npm run reset                          # 预览要清空的记忆库文件
 npm run reset -- --yes                 # 清空记忆库（聊天记录 + 图谱，不可恢复；先停 listen）
+npm run graph                          # 本地起知识图谱可视化（只读，默认 http://127.0.0.1:4319）
+npm run graph -- --host 0.0.0.0 --port 4319   # 服务器上开放局域网访问
 npm run service:install                # macOS launchd 常驻
 npm run service:status
 npm run service:uninstall

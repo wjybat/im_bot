@@ -23,6 +23,7 @@
     "once": "tsx src/main.ts once",
     "listen": "tsx src/main.ts listen",
     "reset": "tsx src/main.ts reset",
+    "graph": "tsx src/graph-viewer.ts",
     "service:install": "npm run build && node scripts/launchd.mjs install",
     "service:uninstall": "node scripts/launchd.mjs uninstall",
     "service:status": "node scripts/launchd.mjs status"

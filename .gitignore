@@ -24,3 +24,4 @@ var/*
 !var/.gitkeep
 *.tmp
 bot.log
+.playwright-mcp/
