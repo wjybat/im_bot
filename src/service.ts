@@ -479,7 +479,10 @@ export class PiBotService {
         status = "delivery_failed"
       }
       logger.error("message_processing_failed", error, { message: hash, durationMs: Date.now() - startedAt })
-      if (this.config.replyOnError) {
+      const handled = await this.onProcessingError(message, error)
+      if (handled) {
+        await this.store.mark(message.messageId)
+      } else if (this.config.replyOnError) {
         try {
           await this.replyAndMark(message.replyToMessageId ?? message.messageId, genericErrorReply, "error")
         } catch (replyError) {
@@ -519,6 +522,17 @@ export class PiBotService {
   protected async beforeProcessMessage(owner: OwnerIdentity, message: AcceptedMessage): Promise<void> {
     void owner
     void message
+  }
+
+  /**
+   * Failure hook: lets subclasses take over a failed message (e.g. replace the
+   * generic error reply with a targeted card). Return true when the failure
+   * was handled; the generic error reply is then skipped.
+   */
+  protected async onProcessingError(message: AcceptedMessage, error: unknown): Promise<boolean> {
+    void message
+    void error
+    return false
   }
 
   protected scheduleAuthVerification(): void {

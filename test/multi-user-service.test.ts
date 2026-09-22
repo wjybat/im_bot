@@ -6,7 +6,7 @@ import { join } from "node:path"
 import { loadConfig } from "../src/config.js"
 import { MultiUserService } from "../src/tenant/multi-user-service.js"
 import { TenantTokenStore, type UserTokenRecord } from "../src/tenant/token-store.js"
-import { UserTokenManager } from "../src/tenant/token-manager.js"
+import { RefreshTokenExpiredError, UserTokenManager } from "../src/tenant/token-manager.js"
 import { OwnerMemoryRouter } from "../src/tenant/memory-router.js"
 import { createModelRuntime } from "../src/agent/model.js"
 import type {
@@ -41,6 +41,7 @@ class RecordingGateway implements LarkGateway {
   cardConsumers: CardActionConsumerCallbacks[] = []
   activeOwner = ""
   identityByOwner: Record<string, { openId: string; name: string } | undefined> = {}
+  expiredRefreshFor = new Set<string>()
 
   async check(expectedOwnerOpenId?: string | null): Promise<{ version: string; ownerOpenId: string; ownerName: string | null; botName: string | null; botAppId: string | null; tokenStatus: string | null }> {
     return {
@@ -54,6 +55,10 @@ class RecordingGateway implements LarkGateway {
   }
 
   async ensureUserIdentity(expectedOwnerOpenId?: string | null): Promise<{ ownerOpenId: string; ownerName: string | null; botName: string | null; botAppId: string | null; tokenStatus: string | null }> {
+    const owner = expectedOwnerOpenId ?? ""
+    if (owner !== "" && this.expiredRefreshFor.has(owner)) {
+      throw new RefreshTokenExpiredError("token refresh failed: 20026 refresh token is expired")
+    }
     return this.check(expectedOwnerOpenId)
   }
 
@@ -271,6 +276,68 @@ test("authorized users are processed with per-owner isolation", async (t) => {
   assert.ok(final)
   assert.equal(final.messageId, "om_alice_1")
   assert.equal(final.markdown, "echo:今天有什么要处理的")
+})
+
+test("expired refresh token drops the record and answers with a re-authorization card", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "multi-user-svc-"))
+  t.after(async () => {
+    await rm(stateDir, { recursive: true, force: true })
+  })
+  const config = multiUserConfig(stateDir, { replyOnError: true })
+  const gateway = new RecordingGateway()
+  gateway.expiredRefreshFor.add("ou_alice")
+  const tokenStore = new TenantTokenStore(join(stateDir, "tokens.json"), { appId: "cli_test", appSecret: "s" })
+  await tokenStore.load()
+  await tokenStore.upsert(tokenRecord("ou_alice", "甲"))
+  const tokenManager = new UserTokenManager({
+    app: { appId: "cli_test", appSecret: "s" },
+    store: { get: (id) => tokenStore.get(id), upsert: (r) => tokenStore.upsert(r) },
+  })
+  const seen: Array<{ owner: string | null; text: string }> = []
+  const service = new MultiUserService({
+    config,
+    gateway: gateway as never,
+    tokenStore,
+    tokenManager,
+    runtime: historySpyRuntime(seen) as never,
+    sessionProvider: { sessionFor: () => null as never } as OwnerMemorySessionProvider,
+    buildAuthorizeUrl: (owner, redirect, state) => `https://accounts.feishu.cn/authorize?state=${state}&for=${owner}&redirect=${encodeURIComponent(redirect)}`,
+    setActiveOwner: (owner) => gateway.setActiveOwner(owner),
+  })
+  await service.start()
+
+  const done = new Promise<void>((resolve) => {
+    const timer = setInterval(async () => {
+      const ledger = await readFile(join(stateDir, "usage-ledger.jsonl"), "utf8").catch(() => "")
+      if (ledger.includes('"status":"host_failed"')) {
+        clearInterval(timer)
+        resolve()
+      }
+    }, 10)
+  })
+  gateway.messageConsumers[0]?.onEvent({
+    chat_type: "p2p",
+    sender_type: "user",
+    sender_id: "ou_alice",
+    message_id: "om_alice_expired",
+    message_type: "text",
+    content: "今天有什么要处理的",
+    chat_id: "oc_alice",
+  })
+  await done
+  await service.stop()
+
+  assert.equal(seen.length, 0)
+  assert.equal(gateway.replies.filter((reply) => reply.stage === "error").length, 0)
+  assert.equal(gateway.cardSends.length, 1)
+  assert.equal(gateway.cardSends[0]?.userOpenId, "ou_alice")
+  const card = JSON.stringify(gateway.cardSends[0]?.card)
+  assert.match(card, /需要重新授权/)
+  assert.equal(tokenStore.get("ou_alice"), null)
+  const processed = JSON.parse(await readFile(join(stateDir, "processed-messages.json"), "utf8")) as {
+    processed: Array<{ id: string }>
+  }
+  assert.ok(processed.processed.some((entry) => entry.id === "om_alice_expired"))
 })
 
 test("user outside the allowlist is silently ignored", async (t) => {

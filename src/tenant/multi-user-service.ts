@@ -15,7 +15,7 @@ import type {
 } from "../types.js"
 import { OpenApiGateway } from "./openapi-gateway.js"
 import { TenantTokenStore, type UserTokenRecord } from "./token-store.js"
-import { UserTokenManager } from "./token-manager.js"
+import { RefreshTokenExpiredError, UserTokenManager } from "./token-manager.js"
 import { TENANT_USER_SCOPES } from "./types.js"
 
 interface MultiUserRuntimeOptions {
@@ -113,6 +113,25 @@ export class MultiUserService extends PiBotService {
   }
 
   /**
+   * An expired refresh token is recoverable only through re-authorization:
+   * drop the stale record (so later messages short-circuit to the OAuth card
+   * at enqueue time) and answer this message with the card directly.
+   */
+  protected override async onProcessingError(message: AcceptedMessage, error: unknown): Promise<boolean> {
+    if (!(error instanceof RefreshTokenExpiredError)) return false
+    const sender = message.senderOpenId ?? null
+    if (sender === null || !this.isAllowedUser(sender)) return false
+    logger.warn("user_reauthorization_required", {
+      user: hashIdentifier(sender),
+      message: hashIdentifier(message.messageId),
+      error: error.message,
+    })
+    await this.tokenStore.remove(sender)
+    await this.sendAuthorizationCard(sender, message.messageId, { reauthorization: true })
+    return true
+  }
+
+  /**
    * Gate override: unauthorized-but-allowed users get an OAuth card instead
    * of entering the queue.
    */
@@ -125,7 +144,12 @@ export class MultiUserService extends PiBotService {
     super.enqueueAccepted(accepted)
   }
 
-  private async sendAuthorizationCard(userOpenId: string, replyToMessageId: string): Promise<void> {
+  private async sendAuthorizationCard(
+    userOpenId: string,
+    replyToMessageId: string,
+    options: { reauthorization?: boolean } = {},
+  ): Promise<void> {
+    const reauthorization = options.reauthorization === true
     try {
       const state = randomUUID()
       this.pendingStates.set(state, userOpenId)
@@ -135,9 +159,12 @@ export class MultiUserService extends PiBotService {
         schema: "2.0",
         config: { update_multi: true, width_mode: "default", enable_forward: false },
         header: {
-          title: { tag: "plain_text", content: "需要授权" },
-          subtitle: { tag: "plain_text", content: "授权后即可使用办公助理" },
-          template: "blue",
+          title: { tag: "plain_text", content: reauthorization ? "需要重新授权" : "需要授权" },
+          subtitle: {
+            tag: "plain_text",
+            content: reauthorization ? "授权已过期，重新授权后即可继续使用" : "授权后即可使用办公助理",
+          },
+          template: reauthorization ? "orange" : "blue",
           icon: { tag: "standard_icon", token: "myai_colorful" },
         },
         body: {
@@ -158,8 +185,9 @@ export class MultiUserService extends PiBotService {
                   elements: [
                     {
                       tag: "markdown",
-                      content:
-                        "**首次使用需要授权**\n<font color='grey'>办公助理需要以你的身份读取消息、日程和任务，点击下方按钮完成授权（约 30 秒）</font>",
+                      content: reauthorization
+                        ? "**授权已过期**\n<font color='grey'>授权凭证已失效，需要重新点击下方按钮完成授权（约 30 秒），授权后可继续使用</font>"
+                        : "**首次使用需要授权**\n<font color='grey'>办公助理需要以你的身份读取消息、日程和任务，点击下方按钮完成授权（约 30 秒）</font>",
                     },
                   ],
                 },
@@ -167,7 +195,7 @@ export class MultiUserService extends PiBotService {
             },
             {
               tag: "button",
-              text: { tag: "plain_text", content: "点击授权" },
+              text: { tag: "plain_text", content: reauthorization ? "点击重新授权" : "点击授权" },
               type: "primary_filled",
               width: "fill",
               size: "medium",
@@ -178,7 +206,11 @@ export class MultiUserService extends PiBotService {
         },
       }
       await this.gateway.sendCardMessage({ userOpenId, card })
-      logger.info("authorization_card_sent", { user: hashIdentifier(userOpenId), replyTo: hashIdentifier(replyToMessageId) })
+      logger.info("authorization_card_sent", {
+        user: hashIdentifier(userOpenId),
+        replyTo: hashIdentifier(replyToMessageId),
+        reauthorization,
+      })
     } catch (error) {
       logger.error("authorization_card_send_failed", error, { user: hashIdentifier(userOpenId) })
     }

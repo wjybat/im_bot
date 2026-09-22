@@ -1,6 +1,17 @@
 import * as Lark from "@larksuiteoapi/node-sdk"
 import type { AppCredentials, UserTokenRecord } from "./token-store.js"
 
+/** Feishu authen error code for an expired (unusable) refresh token. */
+export const REFRESH_TOKEN_EXPIRED_CODE = 20026
+
+/** Thrown when the stored refresh token can no longer mint a fresh access token. */
+export class RefreshTokenExpiredError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "RefreshTokenExpiredError"
+  }
+}
+
 export interface TokenManagerOptions {
   app: AppCredentials
   store: {
@@ -61,6 +72,9 @@ export class UserTokenManager {
         refresh_token: current.refreshToken,
       },
     })
+    if (response.code === REFRESH_TOKEN_EXPIRED_CODE) {
+      throw new RefreshTokenExpiredError(`token refresh failed: ${response.code} ${response.msg ?? ""}`)
+    }
     if (response.code !== 0 || !response.data?.access_token) {
       throw new Error(`token refresh failed: ${response.code} ${response.msg ?? ""}`)
     }
