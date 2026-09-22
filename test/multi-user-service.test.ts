@@ -24,6 +24,7 @@ import type {
 function tokenRecord(ownerOpenId: string, name: string): UserTokenRecord {
   return {
     ownerOpenId,
+    ownerUnionId: null,
     ownerName: name,
     userAccessToken: `u-${ownerOpenId}`,
     refreshToken: `r-${ownerOpenId}`,

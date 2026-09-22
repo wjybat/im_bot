@@ -8,6 +8,12 @@ export interface RuntimeConfig {
   stateFile: string
   usageLedgerFile: string
   memoryFile: string
+  memoryApiPort: number
+  memoryApiHost: string
+  memoryApiKeys: string[]
+  memoryApiRatePerMinute: number
+  memoryApiDailyQuota: number
+  memoryApiRefreshCooldownMs: number
   memoryExtractionThinking: ThinkingLevel
   memoryExtractionTimeoutMs: number
   memoryExtractionMaxOutputTokens: number

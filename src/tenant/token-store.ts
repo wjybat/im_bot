@@ -9,6 +9,8 @@ export interface AppCredentials {
 
 export interface UserTokenRecord {
   ownerOpenId: string
+  /** Cross-app stable identity from Feishu OAuth; used by the memory API to route external callers. */
+  ownerUnionId: string | null
   ownerName: string | null
   userAccessToken: string
   refreshToken: string

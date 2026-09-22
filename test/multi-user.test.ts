@@ -21,6 +21,7 @@ test("tenant token store persists per-user records atomically", async (t) => {
   assert.equal(store.get("ou_a"), null)
   await store.upsert({
     ownerOpenId: "ou_a",
+    ownerUnionId: null,
     ownerName: "甲",
     userAccessToken: "u-a",
     refreshToken: "r-a",
@@ -31,6 +32,7 @@ test("tenant token store persists per-user records atomically", async (t) => {
   })
   await store.upsert({
     ownerOpenId: "ou_b",
+    ownerUnionId: null,
     ownerName: "乙",
     userAccessToken: "u-b",
     refreshToken: "r-b",

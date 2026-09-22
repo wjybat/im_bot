@@ -18,6 +18,7 @@ import { OpenApiGateway } from "./tenant/openapi-gateway.js"
 import { TENANT_USER_SCOPES } from "./tenant/types.js"
 import { PiAgentRuntime } from "./agent/pi-runtime.js"
 import { loadRuntimeSkills } from "./agent/skills.js"
+import { startMemoryApiServer } from "./memory-api/server.js"
 
 function usage(): never {
   throw new Error(
@@ -270,17 +271,29 @@ async function runMultiUserListener(config: ReturnType<typeof loadConfig>): Prom
       tokenStore.list().map((record) => ({ ownerOpenId: record.ownerOpenId, ownerName: record.ownerName })),
     onWarmedOnce: () => undefined,
   })
+  let memoryApi: ReturnType<typeof startMemoryApiServer> | null = null
   const stop = async (signal: NodeJS.Signals): Promise<void> => {
     logger.info("signal_received", { signal })
     await warmer.stop()
     await service.stop()
     router.close()
+    if (memoryApi !== null) memoryApi.close()
     setTimeout(() => process.exit(0), 1000).unref()
   }
   process.once("SIGINT", () => void stop("SIGINT"))
   process.once("SIGTERM", () => void stop("SIGTERM"))
   await service.start()
   warmer.start()
+  if (config.memoryApiPort > 0) {
+    memoryApi = startMemoryApiServer({
+      config,
+      gateway,
+      owners: () => tokenStore.list().map((record) => record.ownerOpenId),
+      sessionFor: (ownerOpenId) => router.sessionFor(ownerOpenId),
+      resolveOwnerByUnionId: (unionId) =>
+        tokenStore.list().find((record) => record.ownerUnionId === unionId)?.ownerOpenId ?? null,
+    })
+  }
 }
 
 async function main(): Promise<void> {

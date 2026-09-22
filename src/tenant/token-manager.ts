@@ -48,6 +48,7 @@ export class UserTokenManager {
     }
     const record: UserTokenRecord = {
       ownerOpenId: response.data.open_id ?? "",
+      ownerUnionId: response.data.union_id ?? null,
       ownerName: response.data.name ?? null,
       userAccessToken: response.data.access_token,
       refreshToken: response.data.refresh_token ?? "",
@@ -80,6 +81,7 @@ export class UserTokenManager {
     }
     const record: UserTokenRecord = {
       ownerOpenId,
+      ownerUnionId: response.data.union_id ?? current.ownerUnionId,
       ownerName: current.ownerName,
       userAccessToken: response.data.access_token,
       refreshToken: response.data.refresh_token ?? current.refreshToken,

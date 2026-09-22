@@ -75,6 +75,16 @@ export function loadConfig(): RuntimeConfig {
   if (boolean("IM_BOT_PI_ALLOW_USER_WRITES", false)) {
     throw new Error("IM_BOT_PI_ALLOW_USER_WRITES=true is not supported")
   }
+  const memoryApiKeys = (process.env.IM_BOT_PI_MEMORY_API_KEYS || "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "")
+  const memoryApiPort = integer("IM_BOT_PI_MEMORY_API_PORT", 0, 0, 65_535)
+  if (memoryApiPort > 0 && memoryApiKeys.length === 0) {
+    throw new Error(
+      "IM_BOT_PI_MEMORY_API_PORT > 0 requires IM_BOT_PI_MEMORY_API_KEYS (comma-separated service tokens)",
+    )
+  }
   return Object.freeze({
     projectRoot,
     skillsDir: resolve(projectRoot, "runtime", "skills"),
@@ -82,6 +92,12 @@ export function loadConfig(): RuntimeConfig {
     stateFile: resolve(projectRoot, "var", "processed-messages.json"),
     usageLedgerFile: resolve(projectRoot, "var", "usage-ledger.jsonl"),
     memoryFile: resolve(projectRoot, process.env.IM_BOT_PI_MEMORY_FILE || "var/office-memory.db"),
+    memoryApiPort,
+    memoryApiHost: process.env.IM_BOT_PI_MEMORY_API_HOST || "127.0.0.1",
+    memoryApiKeys,
+    memoryApiRatePerMinute: integer("IM_BOT_PI_MEMORY_API_RATE_PER_MINUTE", 60, 1, 10_000),
+    memoryApiDailyQuota: integer("IM_BOT_PI_MEMORY_API_DAILY_QUOTA", 10_000, 1, 1_000_000),
+    memoryApiRefreshCooldownMs: integer("IM_BOT_PI_MEMORY_API_REFRESH_COOLDOWN_SECONDS", 300, 0, 86_400) * 1000,
     memoryExtractionThinking: thinkingLevel("IM_BOT_PI_MEMORY_THINKING", "low"),
     memoryExtractionTimeoutMs: integer("IM_BOT_PI_MEMORY_EXTRACTION_TIMEOUT_MS", 120_000, 10_000, 300_000),
     memoryExtractionMaxOutputTokens: integer("IM_BOT_PI_MEMORY_EXTRACTION_MAX_OUTPUT_TOKENS", 4096, 256, 16_384),

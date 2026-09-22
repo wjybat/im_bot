@@ -1,0 +1,17 @@
+[Unit]
+Description=Feishu Pi Agent Runtime (im_bot)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__ROOT__
+ExecStart=__NODE__ __ROOT__/dist/src/main.js listen
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
